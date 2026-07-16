@@ -42,5 +42,8 @@ if (( ${#patches[@]} == 0 )); then
   exit 0
 fi
 
-git -C "$destination" am --3way "${patches[@]}"
+committer_name="$(git -C "$destination" config user.name || printf 'Cherry Patch Automation')"
+committer_email="$(git -C "$destination" config user.email || printf 'cherry-patch@users.noreply.github.com')"
+GIT_COMMITTER_NAME="$committer_name" GIT_COMMITTER_EMAIL="$committer_email" \
+  git -C "$destination" am --3way "${patches[@]}"
 printf 'Applied %d patch(es) for %s to %s.\n' "${#patches[@]}" "$line" "$destination"
