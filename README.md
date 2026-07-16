@@ -3,7 +3,7 @@
 This repository maintains replayable Clewdr integration patches for the
 [`CherryHQ/cherry-studio-app`](https://github.com/CherryHQ/cherry-studio-app)
 `main` and `v0.2` branches. It contains patches and automation, not a copy of
-the upstream source tree.
+the upstream source tree. Its default repository branch is `patchset`.
 
 ## Patch series
 
@@ -37,6 +37,11 @@ uploads the resulting verified source archive. Validation uses Node 24 and the
 pinned pnpm version, then runs focused Clewdr tests, workspace build/check
 scripts, lint and format diff checks, type checking, i18n checks when present,
 all tests, and Expo exports for Android and iOS.
+
+The `v0.2` upstream full-lint baseline currently contains 17 errors outside
+the patch. That line runs ESLint and Biome over every changed JavaScript and
+TypeScript file, followed by the full format, type, and test suites. `main`
+continues to run its full lint and mutating-format diff gate.
 
 Artifact consumers restore the archive with
 `scripts/restore-verified-source.sh`. It creates a local Git repository without

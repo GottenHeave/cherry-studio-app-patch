@@ -20,20 +20,57 @@ if [[ ! -d "$source_directory" ]]; then
   exit 1
 fi
 
+raw_dynamic_config="$(mktemp "$source_directory/.raw-app-config.XXXXXX")"
+evaluated_config="$(mktemp "$source_directory/.evaluated-app-config.XXXXXX")"
+sanitized_config="$(mktemp "$source_directory/.sanitized-app-config.XXXXXX")"
+cleanup_config_files() {
+  rm -f "$raw_dynamic_config" "$evaluated_config" "$sanitized_config"
+}
+trap cleanup_config_files EXIT
+
 if [[ -f "$source_directory/app.config.ts" ]]; then
   (
     cd "$source_directory"
-    IOS_BUNDLE_IDENTIFIER="$ios_bundle_identifier" ANDROID_PACKAGE="$android_package" pnpm exec tsx -e "import fs from 'node:fs'; import config from './app.config.ts'; const root = config; const expo = root.expo ?? root; if (expo.extra?.eas) delete expo.extra.eas.projectId; if (expo.updates) delete expo.updates.url; expo.ios ??= {}; delete expo.ios.appleTeamId; expo.ios.bundleIdentifier = process.env.IOS_BUNDLE_IDENTIFIER; expo.android ??= {}; expo.android.package = process.env.ANDROID_PACKAGE; fs.writeFileSync('app.json', JSON.stringify(root, null, 2) + '\\n')"
-    rm app.config.ts
-  )
+    EXPO_NO_DOTENV=1 EXPO_NO_CLIENT_ENV_VARS=1 pnpm exec expo config --full --json
+  ) > "$raw_dynamic_config"
+  if ! jq -e . "$raw_dynamic_config" >/dev/null 2>&1; then
+    first_line_length="$(head -n 1 "$raw_dynamic_config" | wc -c | tr -d ' ')"
+    first_line_sha256="$(head -n 1 "$raw_dynamic_config" | sha256sum | cut -d ' ' -f 1)"
+    printf 'Expo config output is not JSON; first line length=%s sha256=%s (content redacted).\n' \
+      "$first_line_length" "$first_line_sha256" >&2
+    exit 1
+  fi
+  jq -e '
+    .exp
+    | select(type == "object" and (.name | type == "string" and length > 0) and (.slug | type == "string" and length > 0))
+    | { expo: . }
+  ' "$raw_dynamic_config" > "$evaluated_config"
 elif [[ -f "$source_directory/app.json" ]]; then
-  jq --arg ios_bundle_identifier "$ios_bundle_identifier" --arg android_package "$android_package" \
-    'del(.expo.extra.eas.projectId, .expo.ios.appleTeamId, .expo.updates.url) | .expo.ios.bundleIdentifier = $ios_bundle_identifier | .expo.android.package = $android_package' \
-    "$source_directory/app.json" > "$source_directory/app.json.tmp"
-  mv "$source_directory/app.json.tmp" "$source_directory/app.json"
+  jq -e 'select(.expo | type == "object")' "$source_directory/app.json" > "$evaluated_config"
 else
   printf 'No supported Expo app config found in %s.\n' "$source_directory" >&2
   exit 1
+fi
+
+jq --arg ios_bundle_identifier "$ios_bundle_identifier" --arg android_package "$android_package" '
+  del(.expo._internal, .expo.extra.eas.projectId, .expo.ios.appleTeamId, .expo.updates.url)
+  | .expo.ios = (.expo.ios // {})
+  | .expo.ios.bundleIdentifier = $ios_bundle_identifier
+  | .expo.android = (.expo.android // {})
+  | .expo.android.package = $android_package
+' "$evaluated_config" > "$sanitized_config"
+jq -e '
+  type == "object"
+  and (.expo | type == "object")
+  and (.expo.name | type == "string" and length > 0)
+  and (.expo.slug | type == "string" and length > 0)
+  and (.expo.ios.bundleIdentifier | type == "string" and length > 0)
+  and (.expo.android.package | type == "string" and length > 0)
+' "$sanitized_config" >/dev/null
+
+mv "$sanitized_config" "$source_directory/app.json"
+if [[ -f "$source_directory/app.config.ts" ]]; then
+  rm "$source_directory/app.config.ts"
 fi
 
 if [[ -f "$source_directory/eas.json" ]]; then
