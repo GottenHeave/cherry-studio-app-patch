@@ -75,8 +75,6 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version: 24
-          cache: pnpm
-          cache-dependency-path: ${{ runner.temp }}/source/pnpm-lock.yaml
 
       - name: Install dependencies
         working-directory: ${{ runner.temp }}/source
@@ -210,8 +208,6 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version: 24
-          cache: pnpm
-          cache-dependency-path: ${{ runner.temp }}/source/pnpm-lock.yaml
       - name: Install Java
         uses: actions/setup-java@v5
         with:
@@ -254,8 +250,6 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version: 24
-          cache: pnpm
-          cache-dependency-path: ${{ runner.temp }}/source/pnpm-lock.yaml
       - name: Install dependencies
         working-directory: ${{ runner.temp }}/source
         run: pnpm install --frozen-lockfile
