@@ -29,9 +29,14 @@ cleanup_config_files() {
 trap cleanup_config_files EXIT
 
 if [[ -f "$source_directory/app.config.ts" ]]; then
+  expo_cli="$source_directory/node_modules/.bin/expo"
+  if [[ ! -x "$expo_cli" ]]; then
+    printf 'Expo CLI is not installed or executable: %s\n' "$expo_cli" >&2
+    exit 1
+  fi
   (
     cd "$source_directory"
-    EXPO_NO_DOTENV=1 EXPO_NO_CLIENT_ENV_VARS=1 pnpm exec expo config --full --json
+    EXPO_NO_DOTENV=1 EXPO_NO_CLIENT_ENV_VARS=1 "$expo_cli" config --full --json
   ) > "$raw_dynamic_config"
   if ! jq -e . "$raw_dynamic_config" >/dev/null 2>&1; then
     first_line_length="$(head -n 1 "$raw_dynamic_config" | wc -c | tr -d ' ')"
