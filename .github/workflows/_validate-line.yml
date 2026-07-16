@@ -172,13 +172,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
+      - name: Check out patch automation
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Download verified source
         uses: actions/download-artifact@v8
         with:
           name: ${{ needs.prepare.outputs.artifact-name }}
           path: ${{ runner.temp }}/verified
-      - name: Extract verified source
-        run: mkdir "$RUNNER_TEMP/source" && tar -xzf "$RUNNER_TEMP/verified/verified-source.tar.gz" -C "$RUNNER_TEMP/source"
+      - name: Restore verified source repository
+        run: ./scripts/restore-verified-source.sh "$RUNNER_TEMP/verified/verified-source.tar.gz" "$RUNNER_TEMP/source"
       - name: Require platform runtime harness
         run: test -x "$RUNNER_TEMP/source/scripts/ci/clewdr-runtime-smoke.sh" || { echo 'Missing executable scripts/ci/clewdr-runtime-smoke.sh in patch series.' >&2; exit 1; }
       - name: Install pnpm
@@ -212,13 +216,17 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 90
     steps:
+      - name: Check out patch automation
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Download verified source
         uses: actions/download-artifact@v8
         with:
           name: ${{ needs.prepare.outputs.artifact-name }}
           path: ${{ runner.temp }}/verified
-      - name: Extract verified source
-        run: mkdir "$RUNNER_TEMP/source" && tar -xzf "$RUNNER_TEMP/verified/verified-source.tar.gz" -C "$RUNNER_TEMP/source"
+      - name: Restore verified source repository
+        run: ./scripts/restore-verified-source.sh "$RUNNER_TEMP/verified/verified-source.tar.gz" "$RUNNER_TEMP/source"
       - name: Require platform runtime harness
         run: test -x "$RUNNER_TEMP/source/scripts/ci/clewdr-runtime-smoke.sh" || { echo 'Missing executable scripts/ci/clewdr-runtime-smoke.sh in patch series.' >&2; exit 1; }
       - name: Install pnpm

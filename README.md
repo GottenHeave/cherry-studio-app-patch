@@ -38,6 +38,11 @@ pinned pnpm version, then runs focused Clewdr tests, workspace build/check
 scripts, lint and format diff checks, type checking, i18n checks when present,
 all tests, and Expo exports for Android and iOS.
 
+Artifact consumers restore the archive with
+`scripts/restore-verified-source.sh`. It creates a local Git repository without
+a remote or credentials so package lifecycle tools such as `prek install` can
+install repository-local hooks without gaining network credentials.
+
 Each patch series must provide executable
 `scripts/ci/clewdr-runtime-smoke.sh`. Validation runs it in an Android emulator
 and an iOS Simulator. The harness must exercise a real React Native multipart

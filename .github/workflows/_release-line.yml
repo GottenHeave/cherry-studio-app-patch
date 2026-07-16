@@ -63,8 +63,8 @@ jobs:
           name: ${{ needs.validate.outputs.artifact-name }}
           path: ${{ runner.temp }}/verified
 
-      - name: Extract verified source
-        run: mkdir "$RUNNER_TEMP/source" && tar -xzf "$RUNNER_TEMP/verified/verified-source.tar.gz" -C "$RUNNER_TEMP/source"
+      - name: Restore verified source repository
+        run: ./scripts/restore-verified-source.sh "$RUNNER_TEMP/verified/verified-source.tar.gz" "$RUNNER_TEMP/source"
 
       - name: Fail closed on release configuration
         env:
@@ -121,8 +121,8 @@ jobs:
         with:
           name: ${{ needs.validate.outputs.artifact-name }}
           path: ${{ runner.temp }}/verified
-      - name: Extract verified source
-        run: mkdir "$RUNNER_TEMP/source" && tar -xzf "$RUNNER_TEMP/verified/verified-source.tar.gz" -C "$RUNNER_TEMP/source"
+      - name: Restore verified source repository
+        run: ./scripts/restore-verified-source.sh "$RUNNER_TEMP/verified/verified-source.tar.gz" "$RUNNER_TEMP/source"
       - name: Install pnpm
         uses: pnpm/action-setup@v6
         with:
@@ -202,8 +202,8 @@ jobs:
         with:
           name: ${{ needs.validate.outputs.artifact-name }}
           path: ${{ runner.temp }}/verified
-      - name: Extract verified source
-        run: mkdir "$RUNNER_TEMP/source" && tar -xzf "$RUNNER_TEMP/verified/verified-source.tar.gz" -C "$RUNNER_TEMP/source"
+      - name: Restore verified source repository
+        run: ./scripts/restore-verified-source.sh "$RUNNER_TEMP/verified/verified-source.tar.gz" "$RUNNER_TEMP/source"
       - name: Install pnpm
         uses: pnpm/action-setup@v6
         with:
