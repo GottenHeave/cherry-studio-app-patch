@@ -9,23 +9,37 @@ on:
       - patches/**
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: patch-releases
+  cancel-in-progress: false
 
 jobs:
   main:
     name: Release main patch line
+    permissions:
+      contents: write
     uses: ./.github/workflows/_release-line.yml
     with:
       line: main
-      release-enabled: ${{ vars.EAS_RELEASE_ENABLED == 'true' }}
       eas-project-id: ${{ vars.EAS_PROJECT_ID }}
+      ios-bundle-identifier: ${{ vars.IOS_BUNDLE_IDENTIFIER }}
+      android-package: ${{ vars.ANDROID_PACKAGE }}
+      eas-ios-credentials-ready: ${{ vars.EAS_IOS_CREDENTIALS_READY == 'true' }}
+      eas-android-credentials-ready: ${{ vars.EAS_ANDROID_CREDENTIALS_READY == 'true' }}
     secrets: inherit
 
   v0-2:
     name: Release v0.2 patch line
+    permissions:
+      contents: write
     uses: ./.github/workflows/_release-line.yml
     with:
       line: v0.2
-      release-enabled: ${{ vars.EAS_RELEASE_ENABLED == 'true' }}
       eas-project-id: ${{ vars.EAS_PROJECT_ID }}
+      ios-bundle-identifier: ${{ vars.IOS_BUNDLE_IDENTIFIER }}
+      android-package: ${{ vars.ANDROID_PACKAGE }}
+      eas-ios-credentials-ready: ${{ vars.EAS_IOS_CREDENTIALS_READY == 'true' }}
+      eas-android-credentials-ready: ${{ vars.EAS_ANDROID_CREDENTIALS_READY == 'true' }}
     secrets: inherit

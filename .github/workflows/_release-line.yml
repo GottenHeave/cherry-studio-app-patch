@@ -7,27 +7,37 @@ on:
         description: Upstream branch and patch line
         required: true
         type: string
-      release-enabled:
-        description: Whether EAS releases are enabled
-        required: true
-        type: boolean
       eas-project-id:
         description: Patch repository EAS project ID
-        required: false
+        required: true
         type: string
+      ios-bundle-identifier:
+        description: Repository-owned iOS bundle identifier
+        required: true
+        type: string
+      android-package:
+        description: Repository-owned Android package
+        required: true
+        type: string
+      eas-ios-credentials-ready:
+        description: Attestation that repository-owned iOS signing credentials are configured
+        required: true
+        type: boolean
+      eas-android-credentials-ready:
+        description: Attestation that repository-owned Android signing credentials are configured
+        required: true
+        type: boolean
     secrets:
       EXPO_TOKEN:
         required: false
 
 permissions:
-  contents: write
-
-concurrency:
-  group: patch-release-${{ inputs.line }}
-  cancel-in-progress: false
+  contents: read
 
 jobs:
   validate:
+    permissions:
+      contents: read
     uses: ./.github/workflows/_validate-line.yml
     with:
       line: ${{ inputs.line }}
@@ -35,73 +45,88 @@ jobs:
   preflight:
     name: Prepare ${{ inputs.line }} release
     needs: validate
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     outputs:
-      ready: ${{ steps.preflight.outputs.ready }}
       tag: ${{ steps.version.outputs.tag }}
-      pnpm: ${{ steps.version.outputs.pnpm }}
     steps:
-      - name: Check out patch repository
+      - name: Check out patch repository tags
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          persist-credentials: false
 
-      - name: Check release configuration
-        id: preflight
+      - name: Download verified source
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ needs.validate.outputs.artifact-name }}
+          path: ${{ runner.temp }}/verified
+
+      - name: Extract verified source
+        run: mkdir "$RUNNER_TEMP/source" && tar -xzf "$RUNNER_TEMP/verified/verified-source.tar.gz" -C "$RUNNER_TEMP/source"
+
+      - name: Fail closed on release configuration
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
           EAS_PROJECT_ID: ${{ inputs.eas-project-id }}
-          RELEASE_ENABLED: ${{ inputs.release-enabled }}
+          IOS_BUNDLE_IDENTIFIER: ${{ inputs.ios-bundle-identifier }}
+          ANDROID_PACKAGE: ${{ inputs.android-package }}
+          EAS_IOS_CREDENTIALS_READY: ${{ inputs.eas-ios-credentials-ready }}
+          EAS_ANDROID_CREDENTIALS_READY: ${{ inputs.eas-android-credentials-ready }}
         shell: bash
         run: |
-          if [[ "$RELEASE_ENABLED" != 'true' ]]; then
-            echo 'ready=false' >> "$GITHUB_OUTPUT"
-            echo '## EAS release skipped' >> "$GITHUB_STEP_SUMMARY"
-            echo 'Set the repository variable `EAS_RELEASE_ENABLED=true` to enable mobile releases.' >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          [[ -n "$EXPO_TOKEN" ]] || { echo 'EXPO_TOKEN secret is required when EAS releases are enabled.' >&2; exit 1; }
-          [[ -n "$EAS_PROJECT_ID" ]] || { echo 'EAS_PROJECT_ID variable is required when EAS releases are enabled.' >&2; exit 1; }
-          echo 'ready=true' >> "$GITHUB_OUTPUT"
+          [[ -n "$EXPO_TOKEN" ]] || { echo 'EXPO_TOKEN secret is required.' >&2; exit 1; }
+          [[ -n "$EAS_PROJECT_ID" ]] || { echo 'EAS_PROJECT_ID variable is required.' >&2; exit 1; }
+          [[ -n "$IOS_BUNDLE_IDENTIFIER" ]] || { echo 'IOS_BUNDLE_IDENTIFIER variable is required.' >&2; exit 1; }
+          [[ -n "$ANDROID_PACKAGE" ]] || { echo 'ANDROID_PACKAGE variable is required.' >&2; exit 1; }
+          [[ "$EAS_IOS_CREDENTIALS_READY" == 'true' ]] || { echo 'EAS_IOS_CREDENTIALS_READY=true attestation is required.' >&2; exit 1; }
+          [[ "$EAS_ANDROID_CREDENTIALS_READY" == 'true' ]] || { echo 'EAS_ANDROID_CREDENTIALS_READY=true attestation is required.' >&2; exit 1; }
 
-      - name: Replay patches and calculate next tag
-        if: steps.preflight.outputs.ready == 'true'
+      - name: Calculate collision-free tag
         id: version
+        env:
+          LINE: ${{ inputs.line }}
         shell: bash
         run: |
-          ./scripts/apply-patches.sh "${{ inputs.line }}" "$RUNNER_TEMP/source"
-          case "${{ inputs.line }}" in
+          case "$LINE" in
             main)
               version="$(node -p "require('$RUNNER_TEMP/source/package.json').version")"
-              prefix="v${version}-patch"
-              echo 'pnpm=10.26.2' >> "$GITHUB_OUTPUT"
+              prefix="main-v${version}-patch"
               ;;
-            v0.2)
-              prefix='v0.2-patch'
-              echo 'pnpm=11.8.0' >> "$GITHUB_OUTPUT"
-              ;;
-            *) exit 2 ;;
+            v0.2) prefix='v0.2-patch' ;;
+            *) echo "Unsupported patch line: $LINE" >&2; exit 2 ;;
           esac
           highest="$(git tag -l "${prefix}.*" | sed -n 's/^.*\.\([0-9][0-9]*\)$/\1/p' | sort -n | tail -1)"
           echo "tag=${prefix}.$(( ${highest:-0} + 1 ))" >> "$GITHUB_OUTPUT"
 
   build-android:
     name: EAS Android (${{ inputs.line }})
-    needs: preflight
-    if: needs.preflight.outputs.ready == 'true'
+    needs: [validate, preflight]
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    env:
+      EAS_NO_VCS: '1'
     outputs:
       build-id: ${{ steps.build.outputs.build-id }}
     steps:
-      - name: Check out patch repository
+      - name: Check out patch automation
         uses: actions/checkout@v7
-      - name: Replay complete patch series
-        run: ./scripts/apply-patches.sh "${{ inputs.line }}" "$RUNNER_TEMP/source"
+        with:
+          persist-credentials: false
+      - name: Download verified source
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ needs.validate.outputs.artifact-name }}
+          path: ${{ runner.temp }}/verified
+      - name: Extract verified source
+        run: mkdir "$RUNNER_TEMP/source" && tar -xzf "$RUNNER_TEMP/verified/verified-source.tar.gz" -C "$RUNNER_TEMP/source"
       - name: Install pnpm
         uses: pnpm/action-setup@v6
         with:
-          version: ${{ needs.preflight.outputs.pnpm }}
+          version: ${{ needs.validate.outputs.pnpm }}
       - name: Install Node.js
         uses: actions/setup-node@v7
         with:
@@ -117,10 +142,12 @@ jobs:
       - name: Install dependencies
         working-directory: ${{ runner.temp }}/source
         run: pnpm install --frozen-lockfile
-      - name: Bind patch repository EAS project
+      - name: Bind repository-owned EAS identity
         env:
           EAS_PROJECT_ID: ${{ inputs.eas-project-id }}
-        run: ./scripts/configure-eas-project.sh "$RUNNER_TEMP/source" "$EAS_PROJECT_ID"
+          IOS_BUNDLE_IDENTIFIER: ${{ inputs.ios-bundle-identifier }}
+          ANDROID_PACKAGE: ${{ inputs.android-package }}
+        run: ./scripts/configure-eas-project.sh "$RUNNER_TEMP/source" "$EAS_PROJECT_ID" "$IOS_BUNDLE_IDENTIFIER" "$ANDROID_PACKAGE"
       - name: Start Android build
         id: build
         working-directory: ${{ runner.temp }}/source
@@ -156,21 +183,31 @@ jobs:
 
   build-ios:
     name: EAS iOS (${{ inputs.line }})
-    needs: preflight
-    if: needs.preflight.outputs.ready == 'true'
+    needs: [validate, preflight]
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    env:
+      EAS_NO_VCS: '1'
     outputs:
       build-id: ${{ steps.build.outputs.build-id }}
     steps:
-      - name: Check out patch repository
+      - name: Check out patch automation
         uses: actions/checkout@v7
-      - name: Replay complete patch series
-        run: ./scripts/apply-patches.sh "${{ inputs.line }}" "$RUNNER_TEMP/source"
+        with:
+          persist-credentials: false
+      - name: Download verified source
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ needs.validate.outputs.artifact-name }}
+          path: ${{ runner.temp }}/verified
+      - name: Extract verified source
+        run: mkdir "$RUNNER_TEMP/source" && tar -xzf "$RUNNER_TEMP/verified/verified-source.tar.gz" -C "$RUNNER_TEMP/source"
       - name: Install pnpm
         uses: pnpm/action-setup@v6
         with:
-          version: ${{ needs.preflight.outputs.pnpm }}
+          version: ${{ needs.validate.outputs.pnpm }}
       - name: Install Node.js
         uses: actions/setup-node@v7
         with:
@@ -186,10 +223,12 @@ jobs:
       - name: Install dependencies
         working-directory: ${{ runner.temp }}/source
         run: pnpm install --frozen-lockfile
-      - name: Bind patch repository EAS project
+      - name: Bind repository-owned EAS identity
         env:
           EAS_PROJECT_ID: ${{ inputs.eas-project-id }}
-        run: ./scripts/configure-eas-project.sh "$RUNNER_TEMP/source" "$EAS_PROJECT_ID"
+          IOS_BUNDLE_IDENTIFIER: ${{ inputs.ios-bundle-identifier }}
+          ANDROID_PACKAGE: ${{ inputs.android-package }}
+        run: ./scripts/configure-eas-project.sh "$RUNNER_TEMP/source" "$EAS_PROJECT_ID" "$IOS_BUNDLE_IDENTIFIER" "$ANDROID_PACKAGE"
       - name: Start iOS build without submission
         id: build
         working-directory: ${{ runner.temp }}/source
@@ -225,8 +264,9 @@ jobs:
 
   publish:
     name: Publish ${{ inputs.line }} release
-    needs: [preflight, build-android, build-ios]
-    if: needs.preflight.outputs.ready == 'true' && needs.build-android.result == 'success' && needs.build-ios.result == 'success'
+    needs: [validate, preflight, build-android, build-ios]
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     steps:
       - name: Download Android artifact
@@ -248,7 +288,7 @@ jobs:
           generate_release_notes: true
           body: |
             Clewdr patch line: `${{ inputs.line }}`
-            Upstream branch: `CherryHQ/cherry-studio-app@${{ inputs.line }}`
+            Verified upstream commit: `${{ needs.validate.outputs.upstream-sha }}`
             Android EAS build: `${{ needs.build-android.outputs.build-id }}`
             iOS EAS build: `${{ needs.build-ios.outputs.build-id }}`
 

@@ -7,39 +7,69 @@ on:
         description: Upstream branch and patch line
         required: true
         type: string
+    outputs:
+      artifact-name:
+        description: Verified source artifact
+        value: ${{ jobs.prepare.outputs.artifact-name }}
+      pnpm:
+        description: Pinned pnpm version
+        value: ${{ jobs.prepare.outputs.pnpm }}
+      upstream-sha:
+        description: Immutable upstream commit
+        value: ${{ jobs.prepare.outputs.upstream-sha }}
 
 permissions:
   contents: read
 
 jobs:
+  prepare:
+    name: Resolve ${{ inputs.line }} upstream
+    runs-on: ubuntu-latest
+    outputs:
+      artifact-name: ${{ steps.prepare.outputs.artifact-name }}
+      pnpm: ${{ steps.prepare.outputs.pnpm }}
+      upstream-sha: ${{ steps.prepare.outputs.upstream-sha }}
+    steps:
+      - name: Resolve immutable upstream commit
+        id: prepare
+        env:
+          LINE: ${{ inputs.line }}
+        shell: bash
+        run: |
+          case "$LINE" in
+            main) pnpm_version='10.26.2' ;;
+            v0.2) pnpm_version='11.8.0' ;;
+            *) echo "Unsupported patch line: $LINE" >&2; exit 2 ;;
+          esac
+          upstream_sha="$(git ls-remote https://github.com/CherryHQ/cherry-studio-app.git "refs/heads/$LINE" | awk 'NR == 1 { print $1 }')"
+          [[ "$upstream_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "Could not resolve upstream branch: $LINE" >&2; exit 1; }
+          echo "artifact-name=verified-source-${LINE}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+          echo "pnpm=$pnpm_version" >> "$GITHUB_OUTPUT"
+          echo "upstream-sha=$upstream_sha" >> "$GITHUB_OUTPUT"
+
   validate:
-    name: Validate ${{ inputs.line }}
+    name: Quality and bundle checks (${{ inputs.line }})
+    needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
       CI: 'true'
       PRCI: 'true'
+      LINE: ${{ inputs.line }}
+      UPSTREAM_SHA: ${{ needs.prepare.outputs.upstream-sha }}
     steps:
       - name: Check out patch repository
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
-      - name: Select toolchain
-        id: toolchain
-        shell: bash
-        run: |
-          case "${{ inputs.line }}" in
-            main) echo 'pnpm=10.26.2' >> "$GITHUB_OUTPUT" ;;
-            v0.2) echo 'pnpm=11.8.0' >> "$GITHUB_OUTPUT" ;;
-            *) echo 'Unsupported patch line: ${{ inputs.line }}' >&2; exit 2 ;;
-          esac
-
-      - name: Replay complete patch series
-        run: ./scripts/apply-patches.sh "${{ inputs.line }}" "$RUNNER_TEMP/source"
+      - name: Replay complete patch series once
+        run: ./scripts/apply-patches.sh --upstream-ref "$UPSTREAM_SHA" "$LINE" "$RUNNER_TEMP/source"
 
       - name: Install pnpm
         uses: pnpm/action-setup@v6
         with:
-          version: ${{ steps.toolchain.outputs.pnpm }}
+          version: ${{ needs.prepare.outputs.pnpm }}
 
       - name: Install Node.js
         uses: actions/setup-node@v7
@@ -123,3 +153,92 @@ jobs:
       - name: Export iOS bundle
         working-directory: ${{ runner.temp }}/source
         run: pnpm exec expo export --platform ios --output-dir "$RUNNER_TEMP/export-ios"
+
+      - name: Archive verified source
+        working-directory: ${{ runner.temp }}/source
+        run: git archive --format=tar.gz --output="$RUNNER_TEMP/verified-source.tar.gz" HEAD
+
+      - name: Upload verified source
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ needs.prepare.outputs.artifact-name }}
+          path: ${{ runner.temp }}/verified-source.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  runtime-android:
+    name: Android runtime smoke (${{ inputs.line }})
+    needs: [prepare, validate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Download verified source
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ needs.prepare.outputs.artifact-name }}
+          path: ${{ runner.temp }}/verified
+      - name: Extract verified source
+        run: mkdir "$RUNNER_TEMP/source" && tar -xzf "$RUNNER_TEMP/verified/verified-source.tar.gz" -C "$RUNNER_TEMP/source"
+      - name: Require platform runtime harness
+        run: test -x "$RUNNER_TEMP/source/scripts/ci/clewdr-runtime-smoke.sh" || { echo 'Missing executable scripts/ci/clewdr-runtime-smoke.sh in patch series.' >&2; exit 1; }
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: ${{ needs.prepare.outputs.pnpm }}
+      - name: Install Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: ${{ runner.temp }}/source/pnpm-lock.yaml
+      - name: Install Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Install dependencies
+        working-directory: ${{ runner.temp }}/source
+        run: pnpm install --frozen-lockfile
+      - name: Run multipart and stream smoke in Android emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          script: cd "$RUNNER_TEMP/source" && ./scripts/ci/clewdr-runtime-smoke.sh android
+
+  runtime-ios:
+    name: iOS runtime smoke (${{ inputs.line }})
+    needs: [prepare, validate]
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - name: Download verified source
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ needs.prepare.outputs.artifact-name }}
+          path: ${{ runner.temp }}/verified
+      - name: Extract verified source
+        run: mkdir "$RUNNER_TEMP/source" && tar -xzf "$RUNNER_TEMP/verified/verified-source.tar.gz" -C "$RUNNER_TEMP/source"
+      - name: Require platform runtime harness
+        run: test -x "$RUNNER_TEMP/source/scripts/ci/clewdr-runtime-smoke.sh" || { echo 'Missing executable scripts/ci/clewdr-runtime-smoke.sh in patch series.' >&2; exit 1; }
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: ${{ needs.prepare.outputs.pnpm }}
+      - name: Install Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: ${{ runner.temp }}/source/pnpm-lock.yaml
+      - name: Install dependencies
+        working-directory: ${{ runner.temp }}/source
+        run: pnpm install --frozen-lockfile
+      - name: Boot iOS simulator and run multipart and stream smoke
+        working-directory: ${{ runner.temp }}/source
+        shell: bash
+        run: |
+          simulator_udid="$(xcrun simctl list devices available -j | jq -er '[.devices[][] | select(.name | startswith("iPhone"))][0].udid')"
+          xcrun simctl boot "$simulator_udid" 2>/dev/null || true
+          xcrun simctl bootstatus "$simulator_udid" -b
+          CLEWDR_SMOKE_IOS_UDID="$simulator_udid" ./scripts/ci/clewdr-runtime-smoke.sh ios
