@@ -216,6 +216,9 @@ jobs:
       - name: Install dependencies
         working-directory: ${{ runner.temp }}/source
         run: pnpm install --frozen-lockfile
+      - name: Build workspace packages
+        working-directory: ${{ runner.temp }}/source
+        run: pnpm -r --if-present run build
       - name: Run multipart and stream smoke in Android emulator
         uses: reactivecircus/android-emulator-runner@v2
         with:
@@ -253,6 +256,9 @@ jobs:
       - name: Install dependencies
         working-directory: ${{ runner.temp }}/source
         run: pnpm install --frozen-lockfile
+      - name: Build workspace packages
+        working-directory: ${{ runner.temp }}/source
+        run: pnpm -r --if-present run build
       - name: Boot iOS simulator and run multipart and stream smoke
         working-directory: ${{ runner.temp }}/source
         shell: bash
