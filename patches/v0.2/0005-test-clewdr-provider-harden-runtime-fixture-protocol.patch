@@ -1,0 +1,688 @@
+From 1e12a9a921596c8ead2db63ae6c6dad605470cef Mon Sep 17 00:00:00 2001
+From: GottenHeave <274621501+GottenHeave@users.noreply.github.com>
+Date: Thu, 16 Jul 2026 18:15:23 +0000
+Subject: [PATCH 5/5] test(clewdr-provider): harden runtime fixture protocol
+
+Signed-off-by: GottenHeave <274621501+GottenHeave@users.noreply.github.com>
+---
+ scripts/ci/clewdr_runtime_fixture.py      | 128 +++----
+ scripts/ci/test_clewdr_runtime_fixture.py | 387 ++++++++++++----------
+ 2 files changed, 280 insertions(+), 235 deletions(-)
+
+diff --git a/scripts/ci/clewdr_runtime_fixture.py b/scripts/ci/clewdr_runtime_fixture.py
+index eb8b014..28f22a6 100755
+--- a/scripts/ci/clewdr_runtime_fixture.py
++++ b/scripts/ci/clewdr_runtime_fixture.py
+@@ -4,6 +4,7 @@ from __future__ import annotations
+ 
+ import argparse
+ import json
++import re
+ import threading
+ from email import policy
+ from email.parser import BytesParser
+@@ -18,6 +19,7 @@ FILE_ID = "file_clewdr_v1_runtime_smoke"
+ EXPECTED_ANSWER = "runtime smoke ok"
+ EXPECTED_API_KEY = "ci-runtime-smoke"
+ EXPECTED_MODEL = "claude-runtime-smoke"
++SESSION_ID_PATTERN = re.compile(r"^cherry_topic_v1_[0-9a-f]{64}$")
+ 
+ 
+ class FixtureState:
+@@ -25,25 +27,28 @@ class FixtureState:
+         self.lock = threading.Lock()
+         self.upload_received = False
+         self.message_received = False
+-        self.upload_count = 0
+-        self.message_count = 0
+-        self.result_count = 0
++        self.file_requests = 0
++        self.message_requests = 0
++        self.reset_requests = 0
+         self.status = "pending"
+         self.detail = "waiting for native app"
+ 
+     def fail(self, detail: str) -> None:
+         with self.lock:
+-            self.status = "failure"
+-            self.detail = detail
++            if self.status != "failure":
++                self.status = "failure"
++                self.detail = detail
+ 
+     def snapshot(self) -> dict[str, Any]:
+         with self.lock:
+             return {
+                 "status": self.status,
+                 "detail": self.detail,
+-                "uploadCount": self.upload_count,
+-                "messageCount": self.message_count,
+-                "resultCount": self.result_count,
++                "requests": {
++                    "files": self.file_requests,
++                    "messages": self.message_requests,
++                    "sessions_reset": self.reset_requests,
++                },
+             }
+ 
+ 
+@@ -68,6 +73,8 @@ class FixtureHandler(BaseHTTPRequestHandler):
+                 self._handle_file_upload()
+             elif self.path == "/v1/messages":
+                 self._handle_messages()
++            elif self.path == "/v1/sessions/reset":
++                self._handle_session_reset()
+             elif self.path == "/result":
+                 self._handle_result()
+             else:
+@@ -77,7 +84,9 @@ class FixtureHandler(BaseHTTPRequestHandler):
+             self._json_response(400, {"error": "invalid_smoke_request", "detail": str(error)})
+ 
+     def _handle_file_upload(self) -> None:
+-        self._validate_api_key()
++        with self.server.state.lock:
++            self.server.state.file_requests += 1
++        self._require_api_key()
+         content_type = self.headers.get("content-type", "")
+         body = self._read_body()
+         message = BytesParser(policy=policy.default).parsebytes(
+@@ -101,7 +110,6 @@ class FixtureHandler(BaseHTTPRequestHandler):
+ 
+         with self.server.state.lock:
+             self.server.state.upload_received = True
+-            self.server.state.upload_count += 1
+         self._json_response(
+             200,
+             {
+@@ -114,30 +122,47 @@ class FixtureHandler(BaseHTTPRequestHandler):
+         )
+ 
+     def _handle_messages(self) -> None:
+-        self._validate_api_key()
++        with self.server.state.lock:
++            self.server.state.message_requests += 1
++        self._require_api_key()
+         payload = json.loads(self._read_body())
+         with self.server.state.lock:
+-            upload_received = self.server.state.upload_received
+-        if not upload_received:
+-            raise ValueError("message arrived before upload")
++            if not self.server.state.upload_received:
++                raise ValueError("message arrived before upload")
+         if "tools" in payload or "tool_choice" in payload:
+             raise ValueError("Clewdr request must strip tools")
+         if payload.get("model") != EXPECTED_MODEL:
+             raise ValueError("message uses an unexpected model")
+         metadata = payload.get("metadata")
+-        if not isinstance(metadata, dict) or not str(metadata.get("user_id", "")).startswith(
+-            "cherry_topic_v1_"
++        if not isinstance(metadata, dict) or not SESSION_ID_PATTERN.fullmatch(
++            str(metadata.get("user_id", ""))
+         ):
+             raise ValueError("message is missing the explicit session ID")
+         messages = payload.get("messages")
+-        if not _contains_exact_user_document(messages, FILE_ID):
+-            raise ValueError("message does not contain the exact staged document source")
+-        if _contains_base64_source(messages):
+-            raise ValueError("message still contains a base64 source")
++        if not isinstance(messages, list) or len(messages) != 1 or not isinstance(messages[0], dict):
++            raise ValueError("message body must contain exactly one user message")
++        user_message = messages[0]
++        content = user_message.get("content")
++        if user_message.get("role") != "user" or not isinstance(content, list):
++            raise ValueError("message body must contain exactly one user message")
++        for part in content:
++            if (
++                isinstance(part, dict)
++                and isinstance(part.get("source"), dict)
++                and part["source"].get("type") == "base64"
++            ):
++                raise ValueError("message body must not contain base64 sources")
++        documents = [
++            part for part in content if isinstance(part, dict) and part.get("type") == "document"
++        ]
++        expected_source = {"type": "file", "file_id": FILE_ID}
++        if len(documents) != 1 or documents[0].get("source") != expected_source:
++            raise ValueError(
++                "message document must reference the staged file with an exact file source"
++            )
+ 
+         with self.server.state.lock:
+             self.server.state.message_received = True
+-            self.server.state.message_count += 1
+         events = [
+             {"type": "conversation_ready"},
+             {
+@@ -177,6 +202,15 @@ class FixtureHandler(BaseHTTPRequestHandler):
+         self.end_headers()
+         self.wfile.write(body)
+ 
++    def _handle_session_reset(self) -> None:
++        with self.server.state.lock:
++            self.server.state.reset_requests += 1
++        self._require_api_key()
++        payload = json.loads(self._read_body())
++        if not SESSION_ID_PATTERN.fullmatch(str(payload.get("session_id", ""))):
++            raise ValueError("reset is missing the explicit session ID")
++        raise ValueError("native runner unexpectedly reset the session")
++
+     def _handle_result(self) -> None:
+         payload = json.loads(self._read_body())
+         if payload.get("status") != "success":
+@@ -187,20 +221,26 @@ class FixtureHandler(BaseHTTPRequestHandler):
+         if not isinstance(raw_types, list) or "conversation_ready" not in raw_types:
+             raise ValueError("native runner did not consume the Clewdr extension event")
+         with self.server.state.lock:
++            if self.server.state.status == "failure":
++                raise ValueError(f"fixture already failed: {self.server.state.detail}")
++            if not self.server.state.upload_received or not self.server.state.message_received:
++                raise ValueError("native runner finished before the fixture protocol completed")
+             request_counts = (
+-                self.server.state.upload_count,
+-                self.server.state.message_count,
+-                self.server.state.result_count,
++                self.server.state.file_requests,
++                self.server.state.message_requests,
++                self.server.state.reset_requests,
+             )
+-        if request_counts != (1, 1, 0):
+-            raise ValueError("native runner used unexpected fixture request counts")
+-        with self.server.state.lock:
+-            self.server.state.result_count += 1
++            if request_counts != (1, 1, 0):
++                raise ValueError(
++                    "native runner used unexpected request counts: "
++                    f"files={request_counts[0]} messages={request_counts[1]} "
++                    f"sessions/reset={request_counts[2]}"
++                )
+             self.server.state.status = "success"
+             self.server.state.detail = "native multipart upload and stream completed"
+         self._json_response(200, {"ok": True})
+ 
+-    def _validate_api_key(self) -> None:
++    def _require_api_key(self) -> None:
+         if self.headers.get("x-api-key") != EXPECTED_API_KEY:
+             raise ValueError("request is missing the expected x-api-key")
+ 
+@@ -225,36 +265,6 @@ class FixtureHandler(BaseHTTPRequestHandler):
+         return
+ 
+ 
+-def _contains_exact_user_document(value: Any, file_id: str) -> bool:
+-    if not isinstance(value, list):
+-        return False
+-    expected_source = {"type": "file", "file_id": file_id}
+-    for message in value:
+-        if not isinstance(message, dict) or message.get("role") != "user":
+-            continue
+-        content = message.get("content")
+-        if not isinstance(content, list):
+-            continue
+-        if any(
+-            isinstance(part, dict)
+-            and part.get("type") == "document"
+-            and part.get("source") == expected_source
+-            for part in content
+-        ):
+-            return True
+-    return False
+-
+-
+-def _contains_base64_source(value: Any) -> bool:
+-    if isinstance(value, dict):
+-        if value.get("type") == "base64":
+-            return True
+-        return any(_contains_base64_source(child) for child in value.values())
+-    if isinstance(value, list):
+-        return any(_contains_base64_source(child) for child in value)
+-    return False
+-
+-
+ def create_server(host: str, port: int) -> SmokeServer:
+     return SmokeServer((host, port))
+ 
+diff --git a/scripts/ci/test_clewdr_runtime_fixture.py b/scripts/ci/test_clewdr_runtime_fixture.py
+index 5e0a33c..9165215 100755
+--- a/scripts/ci/test_clewdr_runtime_fixture.py
++++ b/scripts/ci/test_clewdr_runtime_fixture.py
+@@ -7,6 +7,7 @@ import importlib.util
+ import json
+ import threading
+ import unittest
++from copy import deepcopy
+ from pathlib import Path
+ 
+ FIXTURE_PATH = Path(__file__).with_name("clewdr_runtime_fixture.py")
+@@ -31,110 +32,47 @@ class ClewdrRuntimeFixtureTest(unittest.TestCase):
+         self.server.server_close()
+         self.thread.join(timeout=2)
+ 
+-    def test_accepts_upload_message_and_native_result(self) -> None:
+-        boundary = "clewdr-smoke-boundary"
+-        upload = _multipart(
+-            boundary,
+-            [
+-                (
+-                    "file",
+-                    fixture.EXPECTED_FILENAME,
+-                    fixture.EXPECTED_MIME,
+-                    fixture.EXPECTED_BYTES,
+-                )
+-            ],
+-        )
+-        status, payload = self._request(
+-            "POST",
+-            "/v1/files",
+-            upload,
+-            {
+-                "content-type": f"multipart/form-data; boundary={boundary}",
+-                "x-api-key": fixture.EXPECTED_API_KEY,
+-            },
+-        )
++    def test_accepts_exact_runtime_protocol(self) -> None:
++        status, payload = self._upload()
+         self.assertEqual(status, 200)
+         self.assertEqual(payload["id"], fixture.FILE_ID)
+ 
+-        message = json.dumps(
+-            {
+-                "messages": [
+-                    {
+-                        "role": "user",
+-                        "content": [
+-                            {
+-                                "type": "document",
+-                                "source": {"type": "file", "file_id": fixture.FILE_ID},
+-                            }
+-                        ]
+-                    }
+-                ],
+-                "metadata": {"user_id": "cherry_topic_v1_test"},
+-                "model": fixture.EXPECTED_MODEL,
+-            }
+-        ).encode()
+-        self.connection.request(
+-            "POST",
+-            "/v1/messages",
+-            message,
+-            {"content-type": "application/json", "x-api-key": fixture.EXPECTED_API_KEY},
+-        )
+-        response = self.connection.getresponse()
+-        stream_body = response.read().decode()
+-        self.assertEqual(response.status, 200)
+-        self.assertIn("conversation_ready", stream_body)
+-        self.assertIn(fixture.EXPECTED_ANSWER, stream_body)
++        status, payload = self._post_message(_valid_message(), expect_stream=True)
++        self.assertEqual(status, 200)
++        self.assertIn("conversation_ready", payload["stream"])
++        self.assertIn(fixture.EXPECTED_ANSWER, payload["stream"])
+ 
+-        result = json.dumps(
+-            {
+-                "status": "success",
+-                "answer": fixture.EXPECTED_ANSWER,
+-                "rawTypes": ["conversation_ready"],
+-            }
+-        ).encode()
+-        status, payload = self._request(
+-            "POST", "/result", result, {"content-type": "application/json"}
+-        )
++        status, payload = self._post_result()
+         self.assertEqual(status, 200)
+         self.assertTrue(payload["ok"])
+         status, payload = self._request("GET", "/status")
+         self.assertEqual(status, 200)
+         self.assertEqual(payload["status"], "success")
+-        self.assertEqual(payload["uploadCount"], 1)
+-        self.assertEqual(payload["messageCount"], 1)
+-        self.assertEqual(payload["resultCount"], 1)
+-
+-    def test_rejects_duplicate_multipart_fields(self) -> None:
+-        boundary = "clewdr-duplicate-boundary"
+-        parts = [
+-            ("file", fixture.EXPECTED_FILENAME, fixture.EXPECTED_MIME, fixture.EXPECTED_BYTES),
+-            ("extra", "extra.bin", fixture.EXPECTED_MIME, b"extra"),
+-        ]
+-        status, payload = self._request(
+-            "POST",
+-            "/v1/files",
+-            _multipart(boundary, parts),
+-            {
+-                "content-type": f"multipart/form-data; boundary={boundary}",
+-                "x-api-key": fixture.EXPECTED_API_KEY,
+-            },
++        self.assertEqual(
++            payload["requests"], {"files": 1, "messages": 1, "sessions_reset": 0}
+         )
+-        self.assertEqual(status, 400)
+-        self.assertIn("exactly one", payload["detail"])
+ 
+-    def test_rejects_wrong_file_metadata_and_bytes(self) -> None:
++    def test_rejects_invalid_multipart_shape_metadata_and_bytes(self) -> None:
+         cases = [
+-            ("wrong.bin", fixture.EXPECTED_MIME, fixture.EXPECTED_BYTES, "filename"),
+-            (fixture.EXPECTED_FILENAME, "text/plain", fixture.EXPECTED_BYTES, "MIME"),
+-            (fixture.EXPECTED_FILENAME, fixture.EXPECTED_MIME, b"wrong", "bytes"),
++            (
++                [
++                    ("file", fixture.EXPECTED_FILENAME, fixture.EXPECTED_MIME, fixture.EXPECTED_BYTES),
++                    ("extra", "extra.bin", fixture.EXPECTED_MIME, b"extra"),
++                ],
++                "exactly one",
++            ),
++            ([("wrong", fixture.EXPECTED_FILENAME, fixture.EXPECTED_MIME, fixture.EXPECTED_BYTES)], "named file"),
++            ([("file", "wrong.bin", fixture.EXPECTED_MIME, fixture.EXPECTED_BYTES)], "filename"),
++            ([("file", fixture.EXPECTED_FILENAME, "text/plain", fixture.EXPECTED_BYTES)], "MIME"),
++            ([("file", fixture.EXPECTED_FILENAME, fixture.EXPECTED_MIME, b"wrong")], "bytes"),
+         ]
+-        for index, (filename, mime_type, data, expected_detail) in enumerate(cases):
++        for index, (parts, expected_detail) in enumerate(cases):
+             with self.subTest(expected_detail=expected_detail):
+                 boundary = f"clewdr-invalid-{index}"
+                 status, payload = self._request(
+                     "POST",
+                     "/v1/files",
+-                    _multipart(boundary, [("file", filename, mime_type, data)]),
++                    _multipart(boundary, parts),
+                     {
+                         "content-type": f"multipart/form-data; boundary={boundary}",
+                         "x-api-key": fixture.EXPECTED_API_KEY,
+@@ -143,105 +81,182 @@ class ClewdrRuntimeFixtureTest(unittest.TestCase):
+                 self.assertEqual(status, 400)
+                 self.assertIn(expected_detail, payload["detail"])
+ 
+-    def test_rejects_missing_api_key(self) -> None:
+-        boundary = "clewdr-missing-key"
+-        status, payload = self._request(
+-            "POST",
+-            "/v1/files",
+-            _multipart(
+-                boundary,
+-                [
+-                    (
+-                        "file",
+-                        fixture.EXPECTED_FILENAME,
+-                        fixture.EXPECTED_MIME,
+-                        fixture.EXPECTED_BYTES,
+-                    )
+-                ],
+-            ),
+-            {"content-type": f"multipart/form-data; boundary={boundary}"},
+-        )
+-        self.assertEqual(status, 400)
+-        self.assertIn("x-api-key", payload["detail"])
++    def test_rejects_missing_or_wrong_upload_auth(self) -> None:
++        for api_key in (None, "wrong-key"):
++            with self.subTest(api_key=api_key):
++                status, payload = self._upload(api_key=api_key)
++                self.assertEqual(status, 400)
++                self.assertIn("x-api-key", payload["detail"])
+ 
+-    def test_rejects_invalid_message_protocol(self) -> None:
+-        boundary = "clewdr-message-protocol"
+-        status, _ = self._request(
+-            "POST",
+-            "/v1/files",
+-            _multipart(
+-                boundary,
+-                [
+-                    (
+-                        "file",
+-                        fixture.EXPECTED_FILENAME,
+-                        fixture.EXPECTED_MIME,
+-                        fixture.EXPECTED_BYTES,
+-                    )
+-                ],
+-            ),
++    def test_rejects_missing_or_wrong_message_auth(self) -> None:
++        self.assertEqual(self._upload()[0], 200)
++        for api_key in (None, "wrong-key"):
++            with self.subTest(api_key=api_key):
++                status, payload = self._post_message(_valid_message(), api_key=api_key)
++                self.assertEqual(status, 400)
++                self.assertIn("x-api-key", payload["detail"])
++        self.assertEqual(self._status()["requests"]["messages"], 2)
++
++    def test_rejects_malformed_session_ids(self) -> None:
++        self.assertEqual(self._upload()[0], 200)
++        for session_id in (
++            "cherry_topic_v1_short",
++            "cherry_topic_v1_" + "A" * 64,
++            "cherry_topic_v1_" + "a" * 64 + "extra",
++        ):
++            with self.subTest(session_id=session_id):
++                payload = _valid_message()
++                payload["metadata"] = {"user_id": session_id}
++                status, response = self._post_message(payload)
++                self.assertEqual(status, 400)
++                self.assertIn("session ID", response["detail"])
++
++    def test_rejects_extra_or_malformed_messages(self) -> None:
++        self.assertEqual(self._upload()[0], 200)
++        cases = []
++        missing = _valid_message()
++        missing["messages"] = []
++        cases.append(missing)
++        extra = _valid_message()
++        extra["messages"].append(deepcopy(extra["messages"][0]))
++        cases.append(extra)
++        wrong_role = _valid_message()
++        wrong_role["messages"][0]["role"] = "assistant"
++        cases.append(wrong_role)
++        malformed_content = _valid_message()
++        malformed_content["messages"][0]["content"] = "invalid"
++        cases.append(malformed_content)
++
++        for payload in cases:
++            with self.subTest(payload=payload):
++                status, response = self._post_message(payload)
++                self.assertEqual(status, 400)
++                self.assertIn("exactly one user message", response["detail"])
++
++    def test_rejects_hidden_wrong_or_extra_documents(self) -> None:
++        self.assertEqual(self._upload()[0], 200)
++        hidden = _valid_message()
++        hidden["messages"][0]["content"] = [
+             {
+-                "content-type": f"multipart/form-data; boundary={boundary}",
+-                "x-api-key": fixture.EXPECTED_API_KEY,
+-            },
++                "type": "text",
++                "text": "nested",
++                "metadata": {"type": "file", "file_id": fixture.FILE_ID},
++            }
++        ]
++        wrong = _valid_message()
++        wrong["messages"][0]["content"][1]["source"]["file_id"] = "file_clewdr_v1_wrong"
++        extra = _valid_message()
++        extra["messages"][0]["content"].append(
++            {"type": "document", "source": {"type": "file", "file_id": fixture.FILE_ID}}
+         )
+-        self.assertEqual(status, 200)
+ 
+-        base_message = {
+-            "messages": [
+-                {
+-                    "role": "user",
+-                    "content": [
+-                        {
+-                            "type": "document",
+-                            "source": {"type": "file", "file_id": fixture.FILE_ID},
+-                        }
+-                    ],
+-                }
+-            ],
+-            "metadata": {"user_id": "cherry_topic_v1_test"},
+-            "model": fixture.EXPECTED_MODEL,
++        for payload in (hidden, wrong, extra):
++            with self.subTest(payload=payload):
++                status, response = self._post_message(payload)
++                self.assertEqual(status, 400)
++                self.assertIn("exact file source", response["detail"])
++
++    def test_rejects_base64_model_and_tool_protocol_violations(self) -> None:
++        self.assertEqual(self._upload()[0], 200)
++        base64_document = _valid_message()
++        base64_document["messages"][0]["content"][1]["source"] = {
++            "type": "base64",
++            "media_type": fixture.EXPECTED_MIME,
++            "data": "Q0xFV0RS",
+         }
+-        cases = [
+-            ({**base_message, "model": "wrong-model"}, "model"),
+-            ({**base_message, "tools": []}, "strip tools"),
+-            (
+-                {
+-                    **base_message,
+-                    "messages": [
+-                        {
+-                            "role": "user",
+-                            "content": [
+-                                *base_message["messages"][0]["content"],
+-                                {
+-                                    "type": "document",
+-                                    "source": {
+-                                        "type": "base64",
+-                                        "media_type": fixture.EXPECTED_MIME,
+-                                        "data": "Q0xFV0RS",
+-                                    },
+-                                },
+-                            ],
+-                        }
+-                    ],
+-                },
+-                "base64",
+-            ),
+-        ]
+-        for payload, expected_detail in cases:
++        wrong_model = _valid_message()
++        wrong_model["model"] = "other-model"
++        with_tools = _valid_message()
++        with_tools["tools"] = [{"name": "unexpected"}]
++
++        for payload, expected_detail in (
++            (base64_document, "base64"),
++            (wrong_model, "model"),
++            (with_tools, "strip tools"),
++        ):
+             with self.subTest(expected_detail=expected_detail):
+-                status, response = self._request(
+-                    "POST",
+-                    "/v1/messages",
+-                    json.dumps(payload).encode(),
+-                    {
+-                        "content-type": "application/json",
+-                        "x-api-key": fixture.EXPECTED_API_KEY,
+-                    },
+-                )
++                status, response = self._post_message(payload)
+                 self.assertEqual(status, 400)
+                 self.assertIn(expected_detail, response["detail"])
+ 
++    def test_rejects_unexpected_session_reset(self) -> None:
++        reset = json.dumps({"session_id": _session_id()}).encode()
++        status, payload = self._request(
++            "POST",
++            "/v1/sessions/reset",
++            reset,
++            {"content-type": "application/json", "x-api-key": fixture.EXPECTED_API_KEY},
++        )
++        self.assertEqual(status, 400)
++        self.assertIn("unexpectedly reset", payload["detail"])
++        status_payload = self._status()
++        self.assertEqual(status_payload["status"], "failure")
++        self.assertEqual(status_payload["requests"]["sessions_reset"], 1)
++
++    def test_invalid_extra_request_is_counted_and_failure_is_sticky(self) -> None:
++        self.assertEqual(self._upload()[0], 200)
++        status, payload = self._upload(data=b"invalid")
++        self.assertEqual(status, 400)
++        self.assertIn("bytes", payload["detail"])
++        first_failure = self._status()["detail"]
++
++        self.assertEqual(self._post_message(_valid_message(), expect_stream=True)[0], 200)
++        status, payload = self._post_result()
++        self.assertEqual(status, 400)
++        self.assertIn("fixture already failed", payload["detail"])
++        status_payload = self._status()
++        self.assertEqual(status_payload["status"], "failure")
++        self.assertEqual(status_payload["detail"], first_failure)
++        self.assertEqual(
++            status_payload["requests"], {"files": 2, "messages": 1, "sessions_reset": 0}
++        )
++
++    def _upload(
++        self,
++        api_key: str | None = fixture.EXPECTED_API_KEY,
++        data: bytes = fixture.EXPECTED_BYTES,
++    ) -> tuple[int, dict[str, object]]:
++        boundary = "clewdr-smoke-boundary"
++        upload = _multipart(
++            boundary,
++            [("file", fixture.EXPECTED_FILENAME, fixture.EXPECTED_MIME, data)],
++        )
++        headers = {"content-type": f"multipart/form-data; boundary={boundary}"}
++        if api_key is not None:
++            headers["x-api-key"] = api_key
++        return self._request("POST", "/v1/files", upload, headers)
++
++    def _post_message(
++        self,
++        payload: dict[str, object],
++        api_key: str | None = fixture.EXPECTED_API_KEY,
++        expect_stream: bool = False,
++    ) -> tuple[int, dict[str, object]]:
++        headers = {"content-type": "application/json"}
++        if api_key is not None:
++            headers["x-api-key"] = api_key
++        self.connection.request("POST", "/v1/messages", json.dumps(payload).encode(), headers)
++        response = self.connection.getresponse()
++        body = response.read()
++        if expect_stream:
++            return response.status, {"stream": body.decode()}
++        return response.status, json.loads(body)
++
++    def _post_result(self) -> tuple[int, dict[str, object]]:
++        result = json.dumps(
++            {
++                "status": "success",
++                "answer": fixture.EXPECTED_ANSWER,
++                "rawTypes": ["conversation_ready"],
++            }
++        ).encode()
++        return self._request("POST", "/result", result, {"content-type": "application/json"})
++
++    def _status(self) -> dict[str, object]:
++        status, payload = self._request("GET", "/status")
++        self.assertEqual(status, 200)
++        return payload
++
+     def _request(
+         self,
+         method: str,
+@@ -268,5 +283,25 @@ def _multipart(boundary: str, parts: list[tuple[str, str, str, bytes]]) -> bytes
+     return bytes(body)
+ 
+ 
++def _session_id() -> str:
++    return "cherry_topic_v1_" + "a" * 64
++
++
++def _valid_message() -> dict[str, object]:
++    return {
++        "model": fixture.EXPECTED_MODEL,
++        "messages": [
++            {
++                "role": "user",
++                "content": [
++                    {"type": "text", "text": "Read the attached runtime smoke payload."},
++                    {"type": "document", "source": {"type": "file", "file_id": fixture.FILE_ID}},
++                ],
++            }
++        ],
++        "metadata": {"user_id": _session_id()},
++    }
++
++
+ if __name__ == "__main__":
+     unittest.main()

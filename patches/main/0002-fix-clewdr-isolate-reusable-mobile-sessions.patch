@@ -1,0 +1,768 @@
+From 76b0ac98a63a14ef8ef4c962c56c388fecbdf5e2 Mon Sep 17 00:00:00 2001
+From: GottenHeave <274621501+GottenHeave@users.noreply.github.com>
+Date: Thu, 16 Jul 2026 17:20:29 +0000
+Subject: [PATCH 2/4] fix(clewdr): isolate reusable mobile sessions
+
+Signed-off-by: GottenHeave <274621501+GottenHeave@users.noreply.github.com>
+---
+ patches/@ai-sdk__anthropic@2.0.57.patch       | 12 ++-
+ pnpm-lock.yaml                                | 26 +++---
+ src/aiCore/__tests__/index_new.test.ts        | 59 +++++++++++++
+ src/aiCore/index_new.ts                       | 16 ++--
+ .../__tests__/clewdrAnthropicBoundary.test.ts | 59 +++++++++++++
+ .../__tests__/clewdrIntegration.test.ts       | 23 ++++-
+ .../provider/__tests__/clewdrProvider.test.ts | 87 ++++++++++++++++++-
+ src/aiCore/provider/clewdrProvider.ts         | 79 ++++++++++-------
+ src/aiCore/provider/providerConfig.ts         |  5 +-
+ src/services/ApiService.ts                    |  3 +-
+ src/services/MessagesService.ts               |  1 +
+ 11 files changed, 310 insertions(+), 60 deletions(-)
+ create mode 100644 src/aiCore/__tests__/index_new.test.ts
+
+diff --git a/patches/@ai-sdk__anthropic@2.0.57.patch b/patches/@ai-sdk__anthropic@2.0.57.patch
+index cd0aa7a..caa7b36 100644
+--- a/patches/@ai-sdk__anthropic@2.0.57.patch
++++ b/patches/@ai-sdk__anthropic@2.0.57.patch
+@@ -57,7 +57,7 @@ index e273a3cb0a7468481bc9b66baa1c434fbfdadd88..1a7e08ca3be4a4cecd763d61001e019a
+      const transformedStream = response.pipeThrough(
+        new TransformStream({
+          start(controller) {
+-@@ -2367,10 +2386,13 @@ var AnthropicMessagesLanguageModel = class {
++@@ -2367,10 +2386,15 @@ var AnthropicMessagesLanguageModel = class {
+          },
+          transform(chunk, controller) {
+            var _a2, _b2, _c, _d, _e, _f, _g, _h, _i, _j;
+@@ -66,7 +66,9 @@ index e273a3cb0a7468481bc9b66baa1c434fbfdadd88..1a7e08ca3be4a4cecd763d61001e019a
+              controller.enqueue({ type: "raw", rawValue: chunk.rawValue });
+            }
+            if (!chunk.success) {
+-+            if (clewdr) {
+++            const rawValue = chunk.rawValue;
+++            const clewdrExtension = rawValue != null && typeof rawValue === "object" && (rawValue.type === "conversation_ready" || rawValue.type === "message_limit" || rawValue.type === "content_block_delta" && rawValue.delta != null && typeof rawValue.delta === "object" && (rawValue.delta.type === "tool_use_block_update_delta" || rawValue.delta.type === "thinking_cut_off_delta"));
+++            if (clewdr && clewdrExtension) {
+ +              return;
+ +            }
+              controller.enqueue({ type: "error", error: chunk.error });
+@@ -148,7 +150,7 @@ index dc4157434cbf3f4afbf70b83c5d40fe85d40b883..86df7df38b11499e1986e26a5b7f3503
+      const transformedStream = response.pipeThrough(
+        new TransformStream({
+          start(controller) {
+-@@ -2386,10 +2405,13 @@ var AnthropicMessagesLanguageModel = class {
++@@ -2386,10 +2405,15 @@ var AnthropicMessagesLanguageModel = class {
+          },
+          transform(chunk, controller) {
+            var _a2, _b2, _c, _d, _e, _f, _g, _h, _i, _j;
+@@ -157,7 +159,9 @@ index dc4157434cbf3f4afbf70b83c5d40fe85d40b883..86df7df38b11499e1986e26a5b7f3503
+              controller.enqueue({ type: "raw", rawValue: chunk.rawValue });
+            }
+            if (!chunk.success) {
+-+            if (clewdr) {
+++            const rawValue = chunk.rawValue;
+++            const clewdrExtension = rawValue != null && typeof rawValue === "object" && (rawValue.type === "conversation_ready" || rawValue.type === "message_limit" || rawValue.type === "content_block_delta" && rawValue.delta != null && typeof rawValue.delta === "object" && (rawValue.delta.type === "tool_use_block_update_delta" || rawValue.delta.type === "thinking_cut_off_delta"));
+++            if (clewdr && clewdrExtension) {
+ +              return;
+ +            }
+              controller.enqueue({ type: "error", error: chunk.error });
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index 4605f68..8339efc 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -15,7 +15,7 @@ overrides:
+ 
+ patchedDependencies:
+   '@ai-sdk/anthropic@2.0.57':
+-    hash: 7fdcb0ffe93c6ed62ec3d7bae4d6c5402d8753ab81b9e88c73d801b43dc4457d
++    hash: 0a78045fc29aa43a0c56f729b8ed3a6f20d12fdc00adae861d9f249caf408e8f
+     path: patches/@ai-sdk__anthropic@2.0.57.patch
+   '@ai-sdk/google@2.0.38':
+     hash: 8cd08f54105771c47d21ae945a3836899a5dcf943d4e838da7f968fac15a08c6
+@@ -38,7 +38,7 @@ importers:
+         version: 3.0.73(zod@3.25.76)
+       '@ai-sdk/anthropic':
+         specifier: ^2.0.44
+-        version: 2.0.57(patch_hash=7fdcb0ffe93c6ed62ec3d7bae4d6c5402d8753ab81b9e88c73d801b43dc4457d)(zod@3.25.76)
++        version: 2.0.57(patch_hash=0a78045fc29aa43a0c56f729b8ed3a6f20d12fdc00adae861d9f249caf408e8f)(zod@3.25.76)
+       '@ai-sdk/cerebras':
+         specifier: ^1.0.31
+         version: 1.0.34(zod@3.25.76)
+@@ -83,10 +83,10 @@ importers:
+         version: 0.6.1(react-native@0.81.4(@babel/core@7.28.5)(@types/react@19.1.17)(react@19.1.0))(react@19.1.0)
+       '@cherrystudio/ai-core':
+         specifier: ^1.0.9
+-        version: 1.0.9(@ai-sdk/google@2.0.38(patch_hash=8cd08f54105771c47d21ae945a3836899a5dcf943d4e838da7f968fac15a08c6)(zod@3.25.76))(@ai-sdk/openai@2.0.64(patch_hash=b45bea4db6bd5366706df6df9aae2b2f3e611a0b0cc0409b5d1d6080701029d4)(zod@3.25.76))(@cherrystudio/ai-sdk-provider@0.1.3(@ai-sdk/anthropic@2.0.57(patch_hash=7fdcb0ffe93c6ed62ec3d7bae4d6c5402d8753ab81b9e88c73d801b43dc4457d)(zod@3.25.76))(@ai-sdk/google@2.0.38(patch_hash=8cd08f54105771c47d21ae945a3836899a5dcf943d4e838da7f968fac15a08c6)(zod@3.25.76))(@ai-sdk/openai@2.0.64(patch_hash=b45bea4db6bd5366706df6df9aae2b2f3e611a0b0cc0409b5d1d6080701029d4)(zod@3.25.76))(ai@5.0.117(zod@3.25.76))(zod@3.25.76))(ai@5.0.117(zod@3.25.76))
++        version: 1.0.9(@ai-sdk/google@2.0.38(patch_hash=8cd08f54105771c47d21ae945a3836899a5dcf943d4e838da7f968fac15a08c6)(zod@3.25.76))(@ai-sdk/openai@2.0.64(patch_hash=b45bea4db6bd5366706df6df9aae2b2f3e611a0b0cc0409b5d1d6080701029d4)(zod@3.25.76))(@cherrystudio/ai-sdk-provider@0.1.3(@ai-sdk/anthropic@2.0.57(patch_hash=0a78045fc29aa43a0c56f729b8ed3a6f20d12fdc00adae861d9f249caf408e8f)(zod@3.25.76))(@ai-sdk/google@2.0.38(patch_hash=8cd08f54105771c47d21ae945a3836899a5dcf943d4e838da7f968fac15a08c6)(zod@3.25.76))(@ai-sdk/openai@2.0.64(patch_hash=b45bea4db6bd5366706df6df9aae2b2f3e611a0b0cc0409b5d1d6080701029d4)(zod@3.25.76))(ai@5.0.117(zod@3.25.76))(zod@3.25.76))(ai@5.0.117(zod@3.25.76))
+       '@cherrystudio/ai-sdk-provider':
+         specifier: ^0.1.3
+-        version: 0.1.3(@ai-sdk/anthropic@2.0.57(patch_hash=7fdcb0ffe93c6ed62ec3d7bae4d6c5402d8753ab81b9e88c73d801b43dc4457d)(zod@3.25.76))(@ai-sdk/google@2.0.38(patch_hash=8cd08f54105771c47d21ae945a3836899a5dcf943d4e838da7f968fac15a08c6)(zod@3.25.76))(@ai-sdk/openai@2.0.64(patch_hash=b45bea4db6bd5366706df6df9aae2b2f3e611a0b0cc0409b5d1d6080701029d4)(zod@3.25.76))(ai@5.0.117(zod@3.25.76))(zod@3.25.76)
++        version: 0.1.3(@ai-sdk/anthropic@2.0.57(patch_hash=0a78045fc29aa43a0c56f729b8ed3a6f20d12fdc00adae861d9f249caf408e8f)(zod@3.25.76))(@ai-sdk/google@2.0.38(patch_hash=8cd08f54105771c47d21ae945a3836899a5dcf943d4e838da7f968fac15a08c6)(zod@3.25.76))(@ai-sdk/openai@2.0.64(patch_hash=b45bea4db6bd5366706df6df9aae2b2f3e611a0b0cc0409b5d1d6080701029d4)(zod@3.25.76))(ai@5.0.117(zod@3.25.76))(zod@3.25.76)
+       '@cherrystudio/openai':
+         specifier: ^6.9.0
+         version: 6.12.0(ws@8.18.3)(zod@3.25.76)
+@@ -10424,7 +10424,7 @@ snapshots:
+ 
+   '@ai-sdk/amazon-bedrock@3.0.73(zod@3.25.76)':
+     dependencies:
+-      '@ai-sdk/anthropic': 2.0.57(patch_hash=7fdcb0ffe93c6ed62ec3d7bae4d6c5402d8753ab81b9e88c73d801b43dc4457d)(zod@3.25.76)
++      '@ai-sdk/anthropic': 2.0.57(patch_hash=0a78045fc29aa43a0c56f729b8ed3a6f20d12fdc00adae861d9f249caf408e8f)(zod@3.25.76)
+       '@ai-sdk/provider': 2.0.1
+       '@ai-sdk/provider-utils': 3.0.20(zod@3.25.76)
+       '@smithy/eventstream-codec': 4.2.10
+@@ -10432,13 +10432,13 @@ snapshots:
+       aws4fetch: 1.0.20
+       zod: 3.25.76
+ 
+-  '@ai-sdk/anthropic@2.0.57(patch_hash=7fdcb0ffe93c6ed62ec3d7bae4d6c5402d8753ab81b9e88c73d801b43dc4457d)(zod@3.25.76)':
++  '@ai-sdk/anthropic@2.0.57(patch_hash=0a78045fc29aa43a0c56f729b8ed3a6f20d12fdc00adae861d9f249caf408e8f)(zod@3.25.76)':
+     dependencies:
+       '@ai-sdk/provider': 2.0.1
+       '@ai-sdk/provider-utils': 3.0.20(zod@3.25.76)
+       zod: 3.25.76
+ 
+-  '@ai-sdk/anthropic@2.0.57(patch_hash=7fdcb0ffe93c6ed62ec3d7bae4d6c5402d8753ab81b9e88c73d801b43dc4457d)(zod@4.3.4)':
++  '@ai-sdk/anthropic@2.0.57(patch_hash=0a78045fc29aa43a0c56f729b8ed3a6f20d12fdc00adae861d9f249caf408e8f)(zod@4.3.4)':
+     dependencies:
+       '@ai-sdk/provider': 2.0.1
+       '@ai-sdk/provider-utils': 3.0.20(zod@4.3.4)
+@@ -10473,7 +10473,7 @@ snapshots:
+ 
+   '@ai-sdk/google-vertex@3.0.97(zod@3.25.76)':
+     dependencies:
+-      '@ai-sdk/anthropic': 2.0.57(patch_hash=7fdcb0ffe93c6ed62ec3d7bae4d6c5402d8753ab81b9e88c73d801b43dc4457d)(zod@3.25.76)
++      '@ai-sdk/anthropic': 2.0.57(patch_hash=0a78045fc29aa43a0c56f729b8ed3a6f20d12fdc00adae861d9f249caf408e8f)(zod@3.25.76)
+       '@ai-sdk/google': 2.0.52(zod@3.25.76)
+       '@ai-sdk/provider': 2.0.1
+       '@ai-sdk/provider-utils': 3.0.20(zod@3.25.76)
+@@ -11814,9 +11814,9 @@ snapshots:
+       react: 19.1.0
+       react-native: 0.81.4(@babel/core@7.28.5)(@types/react@19.1.17)(react@19.1.0)
+ 
+-  '@cherrystudio/ai-core@1.0.9(@ai-sdk/google@2.0.38(patch_hash=8cd08f54105771c47d21ae945a3836899a5dcf943d4e838da7f968fac15a08c6)(zod@3.25.76))(@ai-sdk/openai@2.0.64(patch_hash=b45bea4db6bd5366706df6df9aae2b2f3e611a0b0cc0409b5d1d6080701029d4)(zod@3.25.76))(@cherrystudio/ai-sdk-provider@0.1.3(@ai-sdk/anthropic@2.0.57(patch_hash=7fdcb0ffe93c6ed62ec3d7bae4d6c5402d8753ab81b9e88c73d801b43dc4457d)(zod@3.25.76))(@ai-sdk/google@2.0.38(patch_hash=8cd08f54105771c47d21ae945a3836899a5dcf943d4e838da7f968fac15a08c6)(zod@3.25.76))(@ai-sdk/openai@2.0.64(patch_hash=b45bea4db6bd5366706df6df9aae2b2f3e611a0b0cc0409b5d1d6080701029d4)(zod@3.25.76))(ai@5.0.117(zod@3.25.76))(zod@3.25.76))(ai@5.0.117(zod@3.25.76))':
++  '@cherrystudio/ai-core@1.0.9(@ai-sdk/google@2.0.38(patch_hash=8cd08f54105771c47d21ae945a3836899a5dcf943d4e838da7f968fac15a08c6)(zod@3.25.76))(@ai-sdk/openai@2.0.64(patch_hash=b45bea4db6bd5366706df6df9aae2b2f3e611a0b0cc0409b5d1d6080701029d4)(zod@3.25.76))(@cherrystudio/ai-sdk-provider@0.1.3(@ai-sdk/anthropic@2.0.57(patch_hash=0a78045fc29aa43a0c56f729b8ed3a6f20d12fdc00adae861d9f249caf408e8f)(zod@3.25.76))(@ai-sdk/google@2.0.38(patch_hash=8cd08f54105771c47d21ae945a3836899a5dcf943d4e838da7f968fac15a08c6)(zod@3.25.76))(@ai-sdk/openai@2.0.64(patch_hash=b45bea4db6bd5366706df6df9aae2b2f3e611a0b0cc0409b5d1d6080701029d4)(zod@3.25.76))(ai@5.0.117(zod@3.25.76))(zod@3.25.76))(ai@5.0.117(zod@3.25.76))':
+     dependencies:
+-      '@ai-sdk/anthropic': 2.0.57(patch_hash=7fdcb0ffe93c6ed62ec3d7bae4d6c5402d8753ab81b9e88c73d801b43dc4457d)(zod@4.3.4)
++      '@ai-sdk/anthropic': 2.0.57(patch_hash=0a78045fc29aa43a0c56f729b8ed3a6f20d12fdc00adae861d9f249caf408e8f)(zod@4.3.4)
+       '@ai-sdk/azure': 2.0.91(zod@4.3.4)
+       '@ai-sdk/deepseek': 1.0.33(zod@4.3.4)
+       '@ai-sdk/google': 2.0.38(patch_hash=8cd08f54105771c47d21ae945a3836899a5dcf943d4e838da7f968fac15a08c6)(zod@3.25.76)
+@@ -11825,13 +11825,13 @@ snapshots:
+       '@ai-sdk/provider': 2.0.1
+       '@ai-sdk/provider-utils': 3.0.20(zod@4.3.4)
+       '@ai-sdk/xai': 2.0.43(zod@4.3.4)
+-      '@cherrystudio/ai-sdk-provider': 0.1.3(@ai-sdk/anthropic@2.0.57(patch_hash=7fdcb0ffe93c6ed62ec3d7bae4d6c5402d8753ab81b9e88c73d801b43dc4457d)(zod@3.25.76))(@ai-sdk/google@2.0.38(patch_hash=8cd08f54105771c47d21ae945a3836899a5dcf943d4e838da7f968fac15a08c6)(zod@3.25.76))(@ai-sdk/openai@2.0.64(patch_hash=b45bea4db6bd5366706df6df9aae2b2f3e611a0b0cc0409b5d1d6080701029d4)(zod@3.25.76))(ai@5.0.117(zod@3.25.76))(zod@3.25.76)
++      '@cherrystudio/ai-sdk-provider': 0.1.3(@ai-sdk/anthropic@2.0.57(patch_hash=0a78045fc29aa43a0c56f729b8ed3a6f20d12fdc00adae861d9f249caf408e8f)(zod@3.25.76))(@ai-sdk/google@2.0.38(patch_hash=8cd08f54105771c47d21ae945a3836899a5dcf943d4e838da7f968fac15a08c6)(zod@3.25.76))(@ai-sdk/openai@2.0.64(patch_hash=b45bea4db6bd5366706df6df9aae2b2f3e611a0b0cc0409b5d1d6080701029d4)(zod@3.25.76))(ai@5.0.117(zod@3.25.76))(zod@3.25.76)
+       ai: 5.0.117(zod@3.25.76)
+       zod: 4.3.4
+ 
+-  '@cherrystudio/ai-sdk-provider@0.1.3(@ai-sdk/anthropic@2.0.57(patch_hash=7fdcb0ffe93c6ed62ec3d7bae4d6c5402d8753ab81b9e88c73d801b43dc4457d)(zod@3.25.76))(@ai-sdk/google@2.0.38(patch_hash=8cd08f54105771c47d21ae945a3836899a5dcf943d4e838da7f968fac15a08c6)(zod@3.25.76))(@ai-sdk/openai@2.0.64(patch_hash=b45bea4db6bd5366706df6df9aae2b2f3e611a0b0cc0409b5d1d6080701029d4)(zod@3.25.76))(ai@5.0.117(zod@3.25.76))(zod@3.25.76)':
++  '@cherrystudio/ai-sdk-provider@0.1.3(@ai-sdk/anthropic@2.0.57(patch_hash=0a78045fc29aa43a0c56f729b8ed3a6f20d12fdc00adae861d9f249caf408e8f)(zod@3.25.76))(@ai-sdk/google@2.0.38(patch_hash=8cd08f54105771c47d21ae945a3836899a5dcf943d4e838da7f968fac15a08c6)(zod@3.25.76))(@ai-sdk/openai@2.0.64(patch_hash=b45bea4db6bd5366706df6df9aae2b2f3e611a0b0cc0409b5d1d6080701029d4)(zod@3.25.76))(ai@5.0.117(zod@3.25.76))(zod@3.25.76)':
+     dependencies:
+-      '@ai-sdk/anthropic': 2.0.57(patch_hash=7fdcb0ffe93c6ed62ec3d7bae4d6c5402d8753ab81b9e88c73d801b43dc4457d)(zod@3.25.76)
++      '@ai-sdk/anthropic': 2.0.57(patch_hash=0a78045fc29aa43a0c56f729b8ed3a6f20d12fdc00adae861d9f249caf408e8f)(zod@3.25.76)
+       '@ai-sdk/google': 2.0.38(patch_hash=8cd08f54105771c47d21ae945a3836899a5dcf943d4e838da7f968fac15a08c6)(zod@3.25.76)
+       '@ai-sdk/openai': 2.0.64(patch_hash=b45bea4db6bd5366706df6df9aae2b2f3e611a0b0cc0409b5d1d6080701029d4)(zod@3.25.76)
+       '@ai-sdk/provider': 2.0.1
+diff --git a/src/aiCore/__tests__/index_new.test.ts b/src/aiCore/__tests__/index_new.test.ts
+new file mode 100644
+index 0000000..a742499
+--- /dev/null
++++ b/src/aiCore/__tests__/index_new.test.ts
+@@ -0,0 +1,59 @@
++import { fetch as expoFetch } from 'expo/fetch'
++
++import type { Model, Provider } from '@/types/assistant'
++
++import ModernAiProvider from '../index_new'
++
++jest.mock('expo/fetch', () => ({ fetch: jest.fn() }))
++
++jest.mock('../legacy/index', () => ({
++  __esModule: true,
++  default: jest.fn()
++}))
++
++jest.mock('../middleware/AiSdkMiddlewareBuilder', () => ({
++  buildAiSdkMiddlewares: jest.fn(() => [])
++}))
++
++jest.mock('../plugins/PluginBuilder', () => ({
++  buildPlugins: jest.fn(() => [])
++}))
++
++jest.mock('../provider/factory', () => ({
++  createAiSdkProvider: jest.fn()
++}))
++
++jest.mock('../provider/providerConfig', () => ({
++  getActualProvider: jest.fn(),
++  isModernSdkSupported: jest.fn(),
++  prepareSpecialProviderConfig: jest.fn(),
++  providerToAiSdkConfig: jest.fn(() => ({ providerId: 'clewdr', options: {} }))
++}))
++
++describe('ModernAiProvider transport', () => {
++  it('forwards Headers instances to expo fetch without dropping values', async () => {
++    jest.mocked(expoFetch).mockRejectedValue(new Error('stop after transport capture'))
++    const model = { id: 'claude-test', name: 'Claude Test', provider: 'clewdr' } as Model
++    const provider = {
++      id: 'clewdr',
++      name: 'Clewdr',
++      type: 'anthropic',
++      apiKey: 'secret',
++      apiHost: 'https://clewdr.example/v1/'
++    } as Provider
++    const instance = new ModernAiProvider(model, provider)
++    const customFetch = Reflect.get(instance, 'customFetch') as typeof expoFetch
++
++    await expect(
++      customFetch('https://clewdr.example/v1/messages', {
++        method: 'POST',
++        headers: new Headers({ authorization: 'Bearer secret', 'x-clewdr-protocol': 'explicit-v1' })
++      })
++    ).rejects.toThrow('stop after transport capture')
++
++    const forwardedInit = jest.mocked(expoFetch).mock.calls[0][1]
++    const forwardedHeaders = new Headers(forwardedInit?.headers)
++    expect(forwardedHeaders.get('authorization')).toBe('Bearer secret')
++    expect(forwardedHeaders.get('x-clewdr-protocol')).toBe('explicit-v1')
++  })
++})
+diff --git a/src/aiCore/index_new.ts b/src/aiCore/index_new.ts
+index 6623318..982e7c2 100644
+--- a/src/aiCore/index_new.ts
++++ b/src/aiCore/index_new.ts
+@@ -40,6 +40,7 @@ export type ModernAiProviderConfig = AiSdkMiddlewareConfig & {
+   // topicId for tracing
+   topicId?: string
+   callType: string
++  sessionPurpose?: 'chat' | 'summary' | 'translation'
+ }
+ 
+ export default class ModernAiProvider {
+@@ -72,9 +73,7 @@ export default class ModernAiProvider {
+     this.customFetch = async (url, options) => {
+       const response = await expoFetch(url, {
+         ...options,
+-        headers: {
+-          ...options?.headers
+-        }
++        headers: new Headers(options?.headers)
+       })
+       return response
+     }
+@@ -104,7 +103,12 @@ export default class ModernAiProvider {
+     }
+ 
+     // 准备特殊配置
+-    await prepareSpecialProviderConfig(this.actualProvider, this.config!, providerConfig.topicId)
++    await prepareSpecialProviderConfig(
++      this.actualProvider,
++      this.config!,
++      providerConfig.topicId,
++      providerConfig.sessionPurpose
++    )
+ 
+     // 提前创建本地 provider 实例
+     if (!this.localProvider) {
+@@ -296,6 +300,7 @@ export default class ModernAiProvider {
+       const streamResult = await executor.streamText({
+         ...params,
+         model,
++        includeRawChunks: this.actualProvider.id === 'clewdr',
+         experimental_context: { onChunk: config.onChunk }
+       })
+ 
+@@ -307,7 +312,8 @@ export default class ModernAiProvider {
+     } else {
+       const streamResult = await executor.streamText({
+         ...params,
+-        model
++        model,
++        includeRawChunks: this.actualProvider.id === 'clewdr'
+       })
+ 
+       // 强制消费流,不然await streamResult.text会阻塞
+diff --git a/src/aiCore/provider/__tests__/clewdrAnthropicBoundary.test.ts b/src/aiCore/provider/__tests__/clewdrAnthropicBoundary.test.ts
+index d348771..12349e3 100644
+--- a/src/aiCore/provider/__tests__/clewdrAnthropicBoundary.test.ts
++++ b/src/aiCore/provider/__tests__/clewdrAnthropicBoundary.test.ts
+@@ -1,5 +1,6 @@
+ import { createAnthropic } from '@ai-sdk/anthropic'
+ import type { LanguageModelV2CallOptions, LanguageModelV2StreamPart } from '@ai-sdk/provider'
++import { streamText } from 'ai'
+ 
+ import { createClewdrProvider } from '../clewdrProvider'
+ 
+@@ -105,8 +106,36 @@ describe('Clewdr Anthropic SDK boundary', () => {
+     ).rejects.toThrow('media type: application/zip')
+   })
+ 
++  it('preserves Request and Headers values through the real Clewdr provider wiring', async () => {
++    let receivedHeaders: Headers | undefined
++    const transport = jest.fn(async (input: FetchInput, init?: FetchInit) => {
++      if (String(input).endsWith('/messages')) {
++        receivedHeaders = new Headers(init?.headers)
++        return streamResponse({ type: 'message_stop' })
++      }
++      throw new Error(`Unexpected request: ${String(input)}`)
++    }) as typeof fetch
++    const fetchFunction = (async (input: FetchInput, init?: FetchInit) =>
++      transport(input, { ...init, headers: new Headers(init?.headers) })) as typeof fetch
++    const provider = createClewdrProvider({
++      apiKey: 'secret',
++      baseURL: 'https://clewdr.example/v1',
++      clientId: 'installation-1',
++      sessionId: 'topic-headers',
++      fetch: fetchFunction,
++      headers: { 'x-clewdr-protocol': 'explicit-v1' }
++    })
++
++    await provider.languageModel('claude-test').doStream(textPrompt)
++
++    expect(receivedHeaders?.get('x-api-key')).toBe('secret')
++    expect(receivedHeaders?.get('x-clewdr-protocol')).toBe('explicit-v1')
++    expect(receivedHeaders?.get('content-type')).toBe('application/json')
++  })
++
+   it.each([
+     { type: 'conversation_ready' },
++    { type: 'message_limit' },
+     {
+       type: 'content_block_delta',
+       index: 0,
+@@ -115,6 +144,11 @@ describe('Clewdr Anthropic SDK boundary', () => {
+         message: 'Opening file',
+         display_content: { type: 'text', text: 'Opening file' }
+       }
++    },
++    {
++      type: 'content_block_delta',
++      index: 0,
++      delta: { type: 'thinking_cut_off_delta' }
+     }
+   ])('passes Clewdr-only event $type as raw while official Anthropic reports validation failure', async event => {
+     const clewdrChunks = await streamChunks('clewdr', event)
+@@ -122,4 +156,29 @@ describe('Clewdr Anthropic SDK boundary', () => {
+ 
+     await expect(streamChunks('anthropic.messages', event)).rejects.toThrow('Type validation failed')
+   })
++
++  it('does not swallow malformed standard Anthropic events for Clewdr', async () => {
++    await expect(streamChunks('clewdr', { type: 'message_start', message: {} })).rejects.toThrow(
++      'Type validation failed'
++    )
++  })
++
++  it('exposes Clewdr extension events on the AI SDK fullStream boundary', async () => {
++    const event = { type: 'conversation_ready' }
++    const provider = createAnthropic({
++      apiKey: 'test',
++      fetch: (() => Promise.resolve(streamResponse(event))) as typeof fetch,
++      name: 'clewdr'
++    })
++    const result = streamText({
++      model: provider.languageModel('claude-test'),
++      prompt: 'hello',
++      includeRawChunks: true
++    })
++    const chunks: unknown[] = []
++
++    for await (const chunk of result.fullStream) chunks.push(chunk)
++
++    expect(chunks).toContainEqual({ type: 'raw', rawValue: event })
++  })
+ })
+diff --git a/src/aiCore/provider/__tests__/clewdrIntegration.test.ts b/src/aiCore/provider/__tests__/clewdrIntegration.test.ts
+index 3becbf8..d12bd77 100644
+--- a/src/aiCore/provider/__tests__/clewdrIntegration.test.ts
++++ b/src/aiCore/provider/__tests__/clewdrIntegration.test.ts
+@@ -49,18 +49,37 @@ describe('Clewdr provider integration', () => {
+       options: { baseURL: 'http://127.0.0.1:8484/v1/', apiKey: 'secret', fetch: baseFetch }
+     } as Parameters<typeof prepareSpecialProviderConfig>[1]
+ 
+-    await prepareSpecialProviderConfig(SYSTEM_PROVIDERS_CONFIG.clewdr, config, 'topic-1')
++    await prepareSpecialProviderConfig(SYSTEM_PROVIDERS_CONFIG.clewdr, config, 'topic-1', 'summary')
+ 
+     expect(firstClientId).toBe(secondClientId)
+     expect(storage.set).toHaveBeenCalledTimes(1)
+     expect(config.options).toMatchObject({
+       clientId: firstClientId,
+-      sessionId: 'topic-1',
++      sessionId: 'topic-1\0summary',
+       normalizedEndpoint: 'http://127.0.0.1:8484/v1/'
+     })
+     expect(config.options.fetch).toBe(baseFetch)
+   })
+ 
++  it('keeps main chat sessions stable and isolates auxiliary purposes', async () => {
++    const makeConfig = () =>
++      ({
++        providerId: 'clewdr',
++        options: { baseURL: 'http://127.0.0.1:8484/v1/', apiKey: 'secret' }
++      }) as Parameters<typeof prepareSpecialProviderConfig>[1]
++    const chat = makeConfig()
++    const summary = makeConfig()
++    const translation = makeConfig()
++
++    await prepareSpecialProviderConfig(SYSTEM_PROVIDERS_CONFIG.clewdr, chat, 'topic-1')
++    await prepareSpecialProviderConfig(SYSTEM_PROVIDERS_CONFIG.clewdr, summary, 'topic-1', 'summary')
++    await prepareSpecialProviderConfig(SYSTEM_PROVIDERS_CONFIG.clewdr, translation, 'topic-1', 'translation')
++
++    expect(chat.options.sessionId).toBe('topic-1')
++    expect(summary.options.sessionId).toBe('topic-1\0summary')
++    expect(translation.options.sessionId).toBe('topic-1\0translation')
++  })
++
+   it('fails closed without a topic and leaves official Anthropic configuration unchanged', async () => {
+     const clewdrConfig = {
+       providerId: 'clewdr',
+diff --git a/src/aiCore/provider/__tests__/clewdrProvider.test.ts b/src/aiCore/provider/__tests__/clewdrProvider.test.ts
+index bce68da..420e490 100644
+--- a/src/aiCore/provider/__tests__/clewdrProvider.test.ts
++++ b/src/aiCore/provider/__tests__/clewdrProvider.test.ts
+@@ -71,7 +71,8 @@ function messagesBody(overrides: JsonObject = {}): JsonObject {
+   }
+ }
+ 
+-function makeFetch(options: { messageStatuses?: number[]; uploadIds?: string[] } = {}) {
++function makeFetch(options: { messageResponses?: Response[]; messageStatuses?: number[]; uploadIds?: string[] } = {}) {
++  const messageResponses = [...(options.messageResponses ?? [])]
+   const messageStatuses = [...(options.messageStatuses ?? [200])]
+   const uploadIds = [...(options.uploadIds ?? ['file_clewdr_document', 'file_clewdr_image'])]
+   return jest.fn(async (input: FetchInput, _init?: FetchInit) => {
+@@ -82,7 +83,7 @@ function makeFetch(options: { messageStatuses?: number[]; uploadIds?: string[] }
+     if (url.endsWith('/sessions/reset')) {
+       return jsonResponse({ ok: true })
+     }
+-    return messageResponse(messageStatuses.shift() ?? 200)
++    return messageResponses.shift() ?? messageResponse(messageStatuses.shift() ?? 200)
+   })
+ }
+ 
+@@ -206,6 +207,31 @@ describe('Clewdr provider fetch', () => {
+     }
+   })
+ 
++  it('deduplicates completed uploads across provider fetch instances', async () => {
++    const baseFetch = makeFetch({ uploadIds: ['file_clewdr_cross_instance'] })
++    const firstFetch = createTestFetch(baseFetch as typeof fetch, 'topic-cross-instance')
++    const secondFetch = createTestFetch(baseFetch as typeof fetch, 'topic-cross-instance')
++    const body = messagesBody({
++      messages: [
++        {
++          role: 'user',
++          content: [
++            {
++              type: 'document',
++              source: { type: 'base64', media_type: 'application/x-cross-instance', data: 'ExQ=' },
++              title: 'shared.bin'
++            }
++          ]
++        }
++      ]
++    })
++
++    await firstFetch(`${endpoint}/messages`, { method: 'POST', body: JSON.stringify(body) })
++    await secondFetch(`${endpoint}/messages`, { method: 'POST', body: JSON.stringify(body) })
++
++    expect(uploadCalls(baseFetch)).toHaveLength(1)
++  })
++
+   it('isolates the upload cache by endpoint, session, and principal', async () => {
+     const baseFetch = makeFetch({ uploadIds: ['file_a', 'file_b', 'file_c', 'file_d'] })
+     const body = messagesBody({
+@@ -302,8 +328,11 @@ describe('Clewdr provider fetch', () => {
+     expect(baseFetch.mock.calls.some(([input]) => String(input).endsWith('/sessions/reset'))).toBe(false)
+   })
+ 
+-  it('resets once on 410 and retries the staged body without uploading again', async () => {
+-    const baseFetch = makeFetch({ messageStatuses: [410, 200], uploadIds: ['file_clewdr_reused'] })
++  it('resets once for conversation_expired and retries the staged body without uploading again', async () => {
++    const baseFetch = makeFetch({
++      messageResponses: [jsonResponse({ code: 'conversation_expired' }, 410), messageResponse()],
++      uploadIds: ['file_clewdr_reused']
++    })
+     const body = messagesBody({
+       messages: [
+         {
+@@ -336,6 +365,56 @@ describe('Clewdr provider fetch', () => {
+     })
+   })
+ 
++  it('evicts expired file IDs, uploads preserved base64 again, and retries without resetting the conversation', async () => {
++    const baseFetch = makeFetch({
++      messageResponses: [jsonResponse({ code: 'file_expired' }, 410), messageResponse()],
++      uploadIds: ['file_clewdr_stale', 'file_clewdr_fresh']
++    })
++    const body = messagesBody({
++      messages: [
++        {
++          role: 'user',
++          content: [
++            {
++              type: 'document',
++              source: { type: 'base64', media_type: 'application/x-expired', data: 'FRYX' },
++              title: 'expired.bin'
++            }
++          ]
++        }
++      ]
++    })
++
++    const response = await createTestFetch(baseFetch as typeof fetch, 'topic-file-expired')(`${endpoint}/messages`, {
++      method: 'POST',
++      body: JSON.stringify(body)
++    })
++
++    expect(response.status).toBe(200)
++    expect(uploadCalls(baseFetch)).toHaveLength(2)
++    expect(messageCalls(baseFetch)).toHaveLength(2)
++    const firstBody = JSON.parse(messageCalls(baseFetch)[0][1].body as string)
++    const secondBody = JSON.parse(messageCalls(baseFetch)[1][1].body as string)
++    expect(firstBody.messages[0].content[0].source.file_id).toBe('file_clewdr_stale')
++    expect(secondBody.messages[0].content[0].source.file_id).toBe('file_clewdr_fresh')
++    expect(baseFetch.mock.calls.some(([input]) => String(input).endsWith('/sessions/reset'))).toBe(false)
++  })
++
++  it('propagates unclassified 410 responses without reset or retry', async () => {
++    const baseFetch = makeFetch({ messageResponses: [jsonResponse({ code: 'other_expired' }, 410)] })
++    const response = await createTestFetch(baseFetch as typeof fetch, 'topic-unclassified-410')(
++      `${endpoint}/messages`,
++      {
++        method: 'POST',
++        body: JSON.stringify(messagesBody({ messages: [] }))
++      }
++    )
++
++    expect(response.status).toBe(410)
++    expect(messageCalls(baseFetch)).toHaveLength(1)
++    expect(baseFetch.mock.calls.some(([input]) => String(input).endsWith('/sessions/reset'))).toBe(false)
++  })
++
+   it('passes through non-message requests without cloning the request options', async () => {
+     const baseFetch = makeFetch()
+     const init: NonNullable<FetchInit> = { method: 'GET', headers: { accept: 'application/json' } }
+diff --git a/src/aiCore/provider/clewdrProvider.ts b/src/aiCore/provider/clewdrProvider.ts
+index dc07d61..7262cdb 100644
+--- a/src/aiCore/provider/clewdrProvider.ts
++++ b/src/aiCore/provider/clewdrProvider.ts
+@@ -37,7 +37,6 @@ interface ClewdrFetchSettings {
+ 
+ interface RewriteContext {
+   endpoint: string
+-  fetchIdentity: number
+   principalDigest: string
+   wireSessionId: string
+   headers: Headers
+@@ -52,8 +51,6 @@ export interface ClewdrProviderSettings extends AnthropicProviderSettings {
+ }
+ 
+ const uploadCache = new Map<string, UploadCacheEntry>()
+-const fetchIdentities = new WeakMap<FetchFunction, number>()
+-let nextFetchIdentity = 1
+ 
+ export function getClewdrClientId(): string {
+   const existing = storage.getString(CLEWDR_CLIENT_ID_KEY)
+@@ -102,7 +99,6 @@ export function createClewdrFetch(settings: ClewdrFetchSettings): FetchFunction
+   const endpoint = normalizeClewdrEndpoint(settings.endpoint)
+   const sessionIdPromise = createClewdrSessionId(settings.clientId, endpoint, settings.topicId)
+   const principalDigestPromise = sha256(settings.apiKey ?? '')
+-  const fetchIdentity = getFetchIdentity(settings.fetch)
+ 
+   return async (input, init) => {
+     if (!isMessagesRequest(input) || typeof init?.body !== 'string') return settings.fetch(input, init)
+@@ -112,28 +108,36 @@ export function createClewdrFetch(settings: ClewdrFetchSettings): FetchFunction
+ 
+     const [wireSessionId, principalDigest] = await Promise.all([sessionIdPromise, principalDigestPromise])
+     const messageHeaders = mergeHeaders(input, init.headers)
+-    await rewriteFileSources(parsed, {
++    const rewriteContext: RewriteContext = {
+       endpoint,
+-      fetchIdentity,
+       principalDigest,
+       wireSessionId,
+       headers: messageHeaders,
+       signal: init.signal,
+       fetch: settings.fetch
+-    })
+-
+-    parsed.metadata = {
+-      ...(isJsonObject(parsed.metadata) ? parsed.metadata : {}),
+-      user_id: wireSessionId
+     }
+-    delete parsed.tools
+-    delete parsed.tool_choice
++    const rewrittenCacheKeys = await rewriteFileSources(parsed, rewriteContext)
++
++    prepareSessionBody(parsed, wireSessionId)
+ 
+     messageHeaders.delete('content-length')
+     const rewrittenInit: NonNullable<FetchInit> = { ...init, body: JSON.stringify(parsed), headers: messageHeaders }
+     const response = await settings.fetch(input, rewrittenInit)
+     if (response.status !== 410) return response
+ 
++    const errorCode = await readClewdrErrorCode(response)
++    if (errorCode === 'file_expired') {
++      if (response.body) await response.body.cancel().catch(() => undefined)
++      for (const cacheKey of rewrittenCacheKeys) uploadCache.delete(cacheKey)
++
++      const retryParsed: unknown = JSON.parse(init.body)
++      if (!isJsonObject(retryParsed)) return response
++      await rewriteFileSources(retryParsed, rewriteContext)
++      prepareSessionBody(retryParsed, wireSessionId)
++      return settings.fetch(input, { ...rewrittenInit, body: JSON.stringify(retryParsed) })
++    }
++    if (errorCode !== 'conversation_expired') return response
++
+     if (response.body) await response.body.cancel().catch(() => undefined)
+     const resetHeaders = new Headers(messageHeaders)
+     resetHeaders.set('content-type', 'application/json')
+@@ -150,8 +154,9 @@ export function createClewdrFetch(settings: ClewdrFetchSettings): FetchFunction
+   }
+ }
+ 
+-async function rewriteFileSources(body: JsonObject, context: RewriteContext): Promise<void> {
+-  if (!Array.isArray(body.messages)) return
++async function rewriteFileSources(body: JsonObject, context: RewriteContext): Promise<Set<string>> {
++  const cacheKeys = new Set<string>()
++  if (!Array.isArray(body.messages)) return cacheKeys
+ 
+   const rewrites: Promise<void>[] = []
+   for (const message of body.messages) {
+@@ -165,20 +170,35 @@ async function rewriteFileSources(body: JsonObject, context: RewriteContext): Pr
+ 
+       const filename = normalizeFilename(typeof part.title === 'string' ? part.title : 'file')
+       rewrites.push(
+-        stageFile(source.data, filename, source.media_type, context).then(fileId => {
+-          part.source = { type: 'file', file_id: fileId }
++        stageFile(source.data, filename, source.media_type, context).then(staged => {
++          cacheKeys.add(staged.cacheKey)
++          part.source = { type: 'file', file_id: staged.fileId }
+         })
+       )
+     }
+   }
+   await Promise.all(rewrites)
++  return cacheKeys
+ }
+ 
+-async function stageFile(data: string, filename: string, mediaType: string, context: RewriteContext): Promise<string> {
++function prepareSessionBody(body: JsonObject, wireSessionId: string): void {
++  body.metadata = {
++    ...(isJsonObject(body.metadata) ? body.metadata : {}),
++    user_id: wireSessionId
++  }
++  delete body.tools
++  delete body.tool_choice
++}
++
++async function stageFile(
++  data: string,
++  filename: string,
++  mediaType: string,
++  context: RewriteContext
++): Promise<{ cacheKey: string; fileId: string }> {
+   const bytes = decodeBase64(data)
+   const fileDigest = await sha256(bytes)
+   const cacheKey = JSON.stringify([
+-    context.fetchIdentity,
+     context.endpoint,
+     context.principalDigest,
+     context.wireSessionId,
+@@ -190,7 +210,7 @@ async function stageFile(data: string, filename: string, mediaType: string, cont
+   if (cached) {
+     uploadCache.delete(cacheKey)
+     uploadCache.set(cacheKey, cached)
+-    return cached.promise
++    return { cacheKey, fileId: await cached.promise }
+   }
+ 
+   reserveUploadCacheEntry()
+@@ -208,7 +228,7 @@ async function stageFile(data: string, filename: string, mediaType: string, cont
+     )
+   }
+   uploadCache.set(cacheKey, entry)
+-  return entry.promise
++  return { cacheKey, fileId: await entry.promise }
+ }
+ 
+ async function uploadFile(
+@@ -272,14 +292,6 @@ function mergeHeaders(input: FetchInput, headers: HeadersInput | undefined): Hea
+   return merged
+ }
+ 
+-function getFetchIdentity(fetchFunction: FetchFunction): number {
+-  const existing = fetchIdentities.get(fetchFunction)
+-  if (existing !== undefined) return existing
+-  const identity = nextFetchIdentity++
+-  fetchIdentities.set(fetchFunction, identity)
+-  return identity
+-}
+-
+ function reserveUploadCacheEntry(): void {
+   if (uploadCache.size < MAX_UPLOAD_CACHE_ENTRIES) return
+   const settled = uploadCache.entries().find(([, entry]) => entry.settled)
+@@ -287,6 +299,15 @@ function reserveUploadCacheEntry(): void {
+   uploadCache.delete(settled[0])
+ }
+ 
++async function readClewdrErrorCode(response: Response): Promise<string | undefined> {
++  try {
++    const payload: unknown = await response.clone().json()
++    return isJsonObject(payload) && typeof payload.code === 'string' ? payload.code : undefined
++  } catch {
++    return undefined
++  }
++}
++
+ function isMessagesRequest(input: FetchInput): boolean {
+   const url = typeof Request !== 'undefined' && input instanceof Request ? input.url : String(input)
+   try {
+diff --git a/src/aiCore/provider/providerConfig.ts b/src/aiCore/provider/providerConfig.ts
+index 2e4ec08..fd2946a 100644
+--- a/src/aiCore/provider/providerConfig.ts
++++ b/src/aiCore/provider/providerConfig.ts
+@@ -251,7 +251,8 @@ export function isModernSdkSupported(provider: Provider): boolean {
+ export async function prepareSpecialProviderConfig(
+   provider: Provider,
+   config: ReturnType<typeof providerToAiSdkConfig>,
+-  topicId?: string
++  topicId?: string,
++  sessionPurpose: 'chat' | 'summary' | 'translation' = 'chat'
+ ) {
+   // todo
+   switch (provider.id) {
+@@ -259,7 +260,7 @@ export async function prepareSpecialProviderConfig(
+       if (!topicId) throw new Error('Clewdr requires a topic ID for explicit session reuse')
+       const options = config.options as ClewdrProviderSettings
+       options.clientId = getClewdrClientId()
+-      options.sessionId = topicId
++      options.sessionId = sessionPurpose === 'chat' ? topicId : `${topicId}\0${sessionPurpose}`
+       options.normalizedEndpoint = provider.apiHost
+       break
+     }
+diff --git a/src/services/ApiService.ts b/src/services/ApiService.ts
+index d670ecf..e93f129 100644
+--- a/src/services/ApiService.ts
++++ b/src/services/ApiService.ts
+@@ -252,7 +252,8 @@ export async function fetchTopicNaming(topicId: string, regenerate: boolean = fa
+           ...middlewareConfig,
+           assistant: assistantForRequest,
+           topicId,
+-          callType: 'summary'
++          callType: 'summary',
++          sessionPurpose: 'summary'
+         })
+       ).getText() || t('topics.new_topic')
+     )
+diff --git a/src/services/MessagesService.ts b/src/services/MessagesService.ts
+index ba22603..27a5c00 100644
+--- a/src/services/MessagesService.ts
++++ b/src/services/MessagesService.ts
+@@ -936,6 +936,7 @@ export async function fetchTranslateThunk(assistantMessageId: string, message: M
+           assistant: assistantForRequest,
+           topicId: message.topicId,
+           callType: 'chat',
++          sessionPurpose: 'translation',
+           uiMessages: [message]
+         })
+       ).getText() || ''

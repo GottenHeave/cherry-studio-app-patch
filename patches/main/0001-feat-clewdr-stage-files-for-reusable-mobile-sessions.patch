@@ -1,0 +1,1660 @@
+From 80e733ff79c29370959e1b5d6f7d26c220d3c51d Mon Sep 17 00:00:00 2001
+From: GottenHeave <274621501+GottenHeave@users.noreply.github.com>
+Date: Thu, 16 Jul 2026 16:31:18 +0000
+Subject: [PATCH 1/4] feat(clewdr): stage files for reusable mobile sessions
+
+Signed-off-by: GottenHeave <274621501+GottenHeave@users.noreply.github.com>
+---
+ package.json                                  |   1 +
+ patches/@ai-sdk__anthropic@2.0.57.patch       | 182 +++++++++
+ pnpm-lock.yaml                                |  27 +-
+ src/aiCore/index_new.ts                       |   2 +-
+ .../__tests__/clewdrFileProcessor.test.ts     |  89 +++++
+ .../__tests__/clewdrTools.test.ts             | 103 ++++++
+ src/aiCore/prepareParams/fileProcessor.ts     |  12 +-
+ src/aiCore/prepareParams/parameterBuilder.ts  |   6 +-
+ .../__tests__/clewdrAnthropicBoundary.test.ts | 125 +++++++
+ .../__tests__/clewdrIntegration.test.ts       |  84 +++++
+ .../provider/__tests__/clewdrProvider.test.ts | 349 ++++++++++++++++++
+ src/aiCore/provider/clewdrProvider.ts         | 312 ++++++++++++++++
+ src/aiCore/provider/providerConfig.ts         |  13 +-
+ src/aiCore/provider/providerInitialization.ts |   8 +
+ src/config/models/default.ts                  |   1 +
+ src/config/providers.ts                       |  19 +
+ src/services/AppInitializationService.ts      |   8 +
+ src/types/assistant.ts                        |   1 +
+ src/utils/icons/index.ts                      |   2 +
+ 19 files changed, 1327 insertions(+), 17 deletions(-)
+ create mode 100644 patches/@ai-sdk__anthropic@2.0.57.patch
+ create mode 100644 src/aiCore/prepareParams/__tests__/clewdrFileProcessor.test.ts
+ create mode 100644 src/aiCore/prepareParams/__tests__/clewdrTools.test.ts
+ create mode 100644 src/aiCore/provider/__tests__/clewdrAnthropicBoundary.test.ts
+ create mode 100644 src/aiCore/provider/__tests__/clewdrIntegration.test.ts
+ create mode 100644 src/aiCore/provider/__tests__/clewdrProvider.test.ts
+ create mode 100644 src/aiCore/provider/clewdrProvider.ts
+
+diff --git a/package.json b/package.json
+index d3d315c..ef89e5b 100644
+--- a/package.json
++++ b/package.json
+@@ -259,6 +259,7 @@
+       "minimatch@>=10.0.0 <10.2.3": "10.2.3"
+     },
+     "patchedDependencies": {
++      "@ai-sdk/anthropic@2.0.57": "patches/@ai-sdk__anthropic@2.0.57.patch",
+       "@ai-sdk/google@2.0.38": "patches/@ai-sdk+google@2.0.38.patch",
+       "@ai-sdk/openai@2.0.64": "patches/@ai-sdk+openai@2.0.64.patch",
+       "@react-native-menu/menu@1.2.2": "patches/@react-native-menu+menu@1.2.2.patch",
+diff --git a/patches/@ai-sdk__anthropic@2.0.57.patch b/patches/@ai-sdk__anthropic@2.0.57.patch
+new file mode 100644
+index 0000000..cd0aa7a
+--- /dev/null
++++ b/patches/@ai-sdk__anthropic@2.0.57.patch
+@@ -0,0 +1,182 @@
++diff --git a/dist/index.js b/dist/index.js
++index e273a3cb0a7468481bc9b66baa1c434fbfdadd88..1a7e08ca3be4a4cecd763d61001e019ab2e5330e 100644
++--- a/dist/index.js
+++++ b/dist/index.js
++@@ -1185,7 +1185,8 @@ async function convertToAnthropicMessagesPrompt({
++   prompt,
++   sendReasoning,
++   warnings,
++-  cacheControlValidator
+++  cacheControlValidator,
+++  clewdr
++ }) {
++   var _a, _b, _c, _d, _e;
++   const betas = /* @__PURE__ */ new Set();
++@@ -1322,6 +1323,21 @@ async function convertToAnthropicMessagesPrompt({
++                         },
++                         cache_control: cacheControl
++                       });
+++                    } else if (clewdr) {
+++                      const metadata = await getDocumentMetadata(
+++                        part.providerOptions
+++                      );
+++                      anthropicContent.push({
+++                        type: "document",
+++                        source: {
+++                          type: "base64",
+++                          media_type: part.mediaType,
+++                          data: (0, import_provider_utils10.convertToBase64)(part.data)
+++                        },
+++                        title: (_d = metadata.title) != null ? _d : part.filename != null ? part.filename : "file",
+++                        ...metadata.context && { context: metadata.context },
+++                        cache_control: cacheControl
+++                      });
++                     } else {
++                       throw new import_provider2.UnsupportedFunctionalityError({
++                         functionality: `media type: ${part.mediaType}`
++@@ -1867,11 +1883,13 @@ var AnthropicMessagesLanguageModel = class {
++       inputSchema: responseFormat.schema
++     } : void 0;
++     const cacheControlValidator = new CacheControlValidator();
+++    const clewdr = this.config.provider === "clewdr";
++     const { prompt: messagesPrompt, betas } = await convertToAnthropicMessagesPrompt({
++       prompt,
++       sendReasoning: (_b = anthropicOptions == null ? void 0 : anthropicOptions.sendReasoning) != null ? _b : true,
++       warnings,
++-      cacheControlValidator
+++      cacheControlValidator,
+++      clewdr
++     });
++     const isThinking = ((_c = anthropicOptions == null ? void 0 : anthropicOptions.thinking) == null ? void 0 : _c.type) === "enabled";
++     const thinkingBudget = (_d = anthropicOptions == null ? void 0 : anthropicOptions.thinking) == null ? void 0 : _d.budgetTokens;
++@@ -2360,6 +2378,7 @@ var AnthropicMessagesLanguageModel = class {
++     let container = null;
++     let blockType = void 0;
++     const generateId3 = this.generateId;
+++    const clewdr = this.config.provider === "clewdr";
++     const transformedStream = response.pipeThrough(
++       new TransformStream({
++         start(controller) {
++@@ -2367,10 +2386,13 @@ var AnthropicMessagesLanguageModel = class {
++         },
++         transform(chunk, controller) {
++           var _a2, _b2, _c, _d, _e, _f, _g, _h, _i, _j;
++-          if (options.includeRawChunks) {
+++          if (options.includeRawChunks || clewdr) {
++             controller.enqueue({ type: "raw", rawValue: chunk.rawValue });
++           }
++           if (!chunk.success) {
+++            if (clewdr) {
+++              return;
+++            }
++             controller.enqueue({ type: "error", error: chunk.error });
++             return;
++           }
++@@ -2381,6 +2403,7 @@ var AnthropicMessagesLanguageModel = class {
++             }
++             case "content_block_start": {
++               const contentBlockType = value.content_block.type;
+++              if (clewdr && contentBlockType.includes("tool")) return;
++               blockType = contentBlockType;
++               switch (contentBlockType) {
++                 case "text": {
++@@ -2745,7 +2768,7 @@ var AnthropicMessagesLanguageModel = class {
++               usage.totalTokens = ((_f = usage.inputTokens) != null ? _f : 0) + ((_g = value.usage.output_tokens) != null ? _g : 0);
++               finishReason = mapAnthropicStopReason({
++                 finishReason: value.delta.stop_reason,
++-                isJsonResponseFromTool: usesJsonResponseTool
+++                isJsonResponseFromTool: clewdr || usesJsonResponseTool
++               });
++               stopSequence = (_h = value.delta.stop_sequence) != null ? _h : null;
++               container = value.delta.container != null ? {
++diff --git a/dist/index.mjs b/dist/index.mjs
++index dc4157434cbf3f4afbf70b83c5d40fe85d40b883..86df7df38b11499e1986e26a5b7f350308d5555c 100644
++--- a/dist/index.mjs
+++++ b/dist/index.mjs
++@@ -1204,7 +1204,8 @@ async function convertToAnthropicMessagesPrompt({
++   prompt,
++   sendReasoning,
++   warnings,
++-  cacheControlValidator
+++  cacheControlValidator,
+++  clewdr
++ }) {
++   var _a, _b, _c, _d, _e;
++   const betas = /* @__PURE__ */ new Set();
++@@ -1341,6 +1342,21 @@ async function convertToAnthropicMessagesPrompt({
++                         },
++                         cache_control: cacheControl
++                       });
+++                    } else if (clewdr) {
+++                      const metadata = await getDocumentMetadata(
+++                        part.providerOptions
+++                      );
+++                      anthropicContent.push({
+++                        type: "document",
+++                        source: {
+++                          type: "base64",
+++                          media_type: part.mediaType,
+++                          data: convertToBase64(part.data)
+++                        },
+++                        title: (_d = metadata.title) != null ? _d : part.filename != null ? part.filename : "file",
+++                        ...metadata.context && { context: metadata.context },
+++                        cache_control: cacheControl
+++                      });
++                     } else {
++                       throw new UnsupportedFunctionalityError2({
++                         functionality: `media type: ${part.mediaType}`
++@@ -1886,11 +1902,13 @@ var AnthropicMessagesLanguageModel = class {
++       inputSchema: responseFormat.schema
++     } : void 0;
++     const cacheControlValidator = new CacheControlValidator();
+++    const clewdr = this.config.provider === "clewdr";
++     const { prompt: messagesPrompt, betas } = await convertToAnthropicMessagesPrompt({
++       prompt,
++       sendReasoning: (_b = anthropicOptions == null ? void 0 : anthropicOptions.sendReasoning) != null ? _b : true,
++       warnings,
++-      cacheControlValidator
+++      cacheControlValidator,
+++      clewdr
++     });
++     const isThinking = ((_c = anthropicOptions == null ? void 0 : anthropicOptions.thinking) == null ? void 0 : _c.type) === "enabled";
++     const thinkingBudget = (_d = anthropicOptions == null ? void 0 : anthropicOptions.thinking) == null ? void 0 : _d.budgetTokens;
++@@ -2379,6 +2397,7 @@ var AnthropicMessagesLanguageModel = class {
++     let container = null;
++     let blockType = void 0;
++     const generateId3 = this.generateId;
+++    const clewdr = this.config.provider === "clewdr";
++     const transformedStream = response.pipeThrough(
++       new TransformStream({
++         start(controller) {
++@@ -2386,10 +2405,13 @@ var AnthropicMessagesLanguageModel = class {
++         },
++         transform(chunk, controller) {
++           var _a2, _b2, _c, _d, _e, _f, _g, _h, _i, _j;
++-          if (options.includeRawChunks) {
+++          if (options.includeRawChunks || clewdr) {
++             controller.enqueue({ type: "raw", rawValue: chunk.rawValue });
++           }
++           if (!chunk.success) {
+++            if (clewdr) {
+++              return;
+++            }
++             controller.enqueue({ type: "error", error: chunk.error });
++             return;
++           }
++@@ -2400,6 +2422,7 @@ var AnthropicMessagesLanguageModel = class {
++             }
++             case "content_block_start": {
++               const contentBlockType = value.content_block.type;
+++              if (clewdr && contentBlockType.includes("tool")) return;
++               blockType = contentBlockType;
++               switch (contentBlockType) {
++                 case "text": {
++@@ -2764,7 +2787,7 @@ var AnthropicMessagesLanguageModel = class {
++               usage.totalTokens = ((_f = usage.inputTokens) != null ? _f : 0) + ((_g = value.usage.output_tokens) != null ? _g : 0);
++               finishReason = mapAnthropicStopReason({
++                 finishReason: value.delta.stop_reason,
++-                isJsonResponseFromTool: usesJsonResponseTool
+++                isJsonResponseFromTool: clewdr || usesJsonResponseTool
++               });
++               stopSequence = (_h = value.delta.stop_sequence) != null ? _h : null;
++               container = value.delta.container != null ? {
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index 7611a93..4605f68 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -14,6 +14,9 @@ overrides:
+   minimatch@>=10.0.0 <10.2.3: 10.2.3
+ 
+ patchedDependencies:
++  '@ai-sdk/anthropic@2.0.57':
++    hash: 7fdcb0ffe93c6ed62ec3d7bae4d6c5402d8753ab81b9e88c73d801b43dc4457d
++    path: patches/@ai-sdk__anthropic@2.0.57.patch
+   '@ai-sdk/google@2.0.38':
+     hash: 8cd08f54105771c47d21ae945a3836899a5dcf943d4e838da7f968fac15a08c6
+     path: patches/@ai-sdk+google@2.0.38.patch
+@@ -35,7 +38,7 @@ importers:
+         version: 3.0.73(zod@3.25.76)
+       '@ai-sdk/anthropic':
+         specifier: ^2.0.44
+-        version: 2.0.57(zod@3.25.76)
++        version: 2.0.57(patch_hash=7fdcb0ffe93c6ed62ec3d7bae4d6c5402d8753ab81b9e88c73d801b43dc4457d)(zod@3.25.76)
+       '@ai-sdk/cerebras':
+         specifier: ^1.0.31
+         version: 1.0.34(zod@3.25.76)
+@@ -80,10 +83,10 @@ importers:
+         version: 0.6.1(react-native@0.81.4(@babel/core@7.28.5)(@types/react@19.1.17)(react@19.1.0))(react@19.1.0)
+       '@cherrystudio/ai-core':
+         specifier: ^1.0.9
+-        version: 1.0.9(@ai-sdk/google@2.0.38(patch_hash=8cd08f54105771c47d21ae945a3836899a5dcf943d4e838da7f968fac15a08c6)(zod@3.25.76))(@ai-sdk/openai@2.0.64(patch_hash=b45bea4db6bd5366706df6df9aae2b2f3e611a0b0cc0409b5d1d6080701029d4)(zod@3.25.76))(@cherrystudio/ai-sdk-provider@0.1.3(@ai-sdk/anthropic@2.0.57(zod@3.25.76))(@ai-sdk/google@2.0.38(patch_hash=8cd08f54105771c47d21ae945a3836899a5dcf943d4e838da7f968fac15a08c6)(zod@3.25.76))(@ai-sdk/openai@2.0.64(patch_hash=b45bea4db6bd5366706df6df9aae2b2f3e611a0b0cc0409b5d1d6080701029d4)(zod@3.25.76))(ai@5.0.117(zod@3.25.76))(zod@3.25.76))(ai@5.0.117(zod@3.25.76))
++        version: 1.0.9(@ai-sdk/google@2.0.38(patch_hash=8cd08f54105771c47d21ae945a3836899a5dcf943d4e838da7f968fac15a08c6)(zod@3.25.76))(@ai-sdk/openai@2.0.64(patch_hash=b45bea4db6bd5366706df6df9aae2b2f3e611a0b0cc0409b5d1d6080701029d4)(zod@3.25.76))(@cherrystudio/ai-sdk-provider@0.1.3(@ai-sdk/anthropic@2.0.57(patch_hash=7fdcb0ffe93c6ed62ec3d7bae4d6c5402d8753ab81b9e88c73d801b43dc4457d)(zod@3.25.76))(@ai-sdk/google@2.0.38(patch_hash=8cd08f54105771c47d21ae945a3836899a5dcf943d4e838da7f968fac15a08c6)(zod@3.25.76))(@ai-sdk/openai@2.0.64(patch_hash=b45bea4db6bd5366706df6df9aae2b2f3e611a0b0cc0409b5d1d6080701029d4)(zod@3.25.76))(ai@5.0.117(zod@3.25.76))(zod@3.25.76))(ai@5.0.117(zod@3.25.76))
+       '@cherrystudio/ai-sdk-provider':
+         specifier: ^0.1.3
+-        version: 0.1.3(@ai-sdk/anthropic@2.0.57(zod@3.25.76))(@ai-sdk/google@2.0.38(patch_hash=8cd08f54105771c47d21ae945a3836899a5dcf943d4e838da7f968fac15a08c6)(zod@3.25.76))(@ai-sdk/openai@2.0.64(patch_hash=b45bea4db6bd5366706df6df9aae2b2f3e611a0b0cc0409b5d1d6080701029d4)(zod@3.25.76))(ai@5.0.117(zod@3.25.76))(zod@3.25.76)
++        version: 0.1.3(@ai-sdk/anthropic@2.0.57(patch_hash=7fdcb0ffe93c6ed62ec3d7bae4d6c5402d8753ab81b9e88c73d801b43dc4457d)(zod@3.25.76))(@ai-sdk/google@2.0.38(patch_hash=8cd08f54105771c47d21ae945a3836899a5dcf943d4e838da7f968fac15a08c6)(zod@3.25.76))(@ai-sdk/openai@2.0.64(patch_hash=b45bea4db6bd5366706df6df9aae2b2f3e611a0b0cc0409b5d1d6080701029d4)(zod@3.25.76))(ai@5.0.117(zod@3.25.76))(zod@3.25.76)
+       '@cherrystudio/openai':
+         specifier: ^6.9.0
+         version: 6.12.0(ws@8.18.3)(zod@3.25.76)
+@@ -10421,7 +10424,7 @@ snapshots:
+ 
+   '@ai-sdk/amazon-bedrock@3.0.73(zod@3.25.76)':
+     dependencies:
+-      '@ai-sdk/anthropic': 2.0.57(zod@3.25.76)
++      '@ai-sdk/anthropic': 2.0.57(patch_hash=7fdcb0ffe93c6ed62ec3d7bae4d6c5402d8753ab81b9e88c73d801b43dc4457d)(zod@3.25.76)
+       '@ai-sdk/provider': 2.0.1
+       '@ai-sdk/provider-utils': 3.0.20(zod@3.25.76)
+       '@smithy/eventstream-codec': 4.2.10
+@@ -10429,13 +10432,13 @@ snapshots:
+       aws4fetch: 1.0.20
+       zod: 3.25.76
+ 
+-  '@ai-sdk/anthropic@2.0.57(zod@3.25.76)':
++  '@ai-sdk/anthropic@2.0.57(patch_hash=7fdcb0ffe93c6ed62ec3d7bae4d6c5402d8753ab81b9e88c73d801b43dc4457d)(zod@3.25.76)':
+     dependencies:
+       '@ai-sdk/provider': 2.0.1
+       '@ai-sdk/provider-utils': 3.0.20(zod@3.25.76)
+       zod: 3.25.76
+ 
+-  '@ai-sdk/anthropic@2.0.57(zod@4.3.4)':
++  '@ai-sdk/anthropic@2.0.57(patch_hash=7fdcb0ffe93c6ed62ec3d7bae4d6c5402d8753ab81b9e88c73d801b43dc4457d)(zod@4.3.4)':
+     dependencies:
+       '@ai-sdk/provider': 2.0.1
+       '@ai-sdk/provider-utils': 3.0.20(zod@4.3.4)
+@@ -10470,7 +10473,7 @@ snapshots:
+ 
+   '@ai-sdk/google-vertex@3.0.97(zod@3.25.76)':
+     dependencies:
+-      '@ai-sdk/anthropic': 2.0.57(zod@3.25.76)
++      '@ai-sdk/anthropic': 2.0.57(patch_hash=7fdcb0ffe93c6ed62ec3d7bae4d6c5402d8753ab81b9e88c73d801b43dc4457d)(zod@3.25.76)
+       '@ai-sdk/google': 2.0.52(zod@3.25.76)
+       '@ai-sdk/provider': 2.0.1
+       '@ai-sdk/provider-utils': 3.0.20(zod@3.25.76)
+@@ -11811,9 +11814,9 @@ snapshots:
+       react: 19.1.0
+       react-native: 0.81.4(@babel/core@7.28.5)(@types/react@19.1.17)(react@19.1.0)
+ 
+-  '@cherrystudio/ai-core@1.0.9(@ai-sdk/google@2.0.38(patch_hash=8cd08f54105771c47d21ae945a3836899a5dcf943d4e838da7f968fac15a08c6)(zod@3.25.76))(@ai-sdk/openai@2.0.64(patch_hash=b45bea4db6bd5366706df6df9aae2b2f3e611a0b0cc0409b5d1d6080701029d4)(zod@3.25.76))(@cherrystudio/ai-sdk-provider@0.1.3(@ai-sdk/anthropic@2.0.57(zod@3.25.76))(@ai-sdk/google@2.0.38(patch_hash=8cd08f54105771c47d21ae945a3836899a5dcf943d4e838da7f968fac15a08c6)(zod@3.25.76))(@ai-sdk/openai@2.0.64(patch_hash=b45bea4db6bd5366706df6df9aae2b2f3e611a0b0cc0409b5d1d6080701029d4)(zod@3.25.76))(ai@5.0.117(zod@3.25.76))(zod@3.25.76))(ai@5.0.117(zod@3.25.76))':
++  '@cherrystudio/ai-core@1.0.9(@ai-sdk/google@2.0.38(patch_hash=8cd08f54105771c47d21ae945a3836899a5dcf943d4e838da7f968fac15a08c6)(zod@3.25.76))(@ai-sdk/openai@2.0.64(patch_hash=b45bea4db6bd5366706df6df9aae2b2f3e611a0b0cc0409b5d1d6080701029d4)(zod@3.25.76))(@cherrystudio/ai-sdk-provider@0.1.3(@ai-sdk/anthropic@2.0.57(patch_hash=7fdcb0ffe93c6ed62ec3d7bae4d6c5402d8753ab81b9e88c73d801b43dc4457d)(zod@3.25.76))(@ai-sdk/google@2.0.38(patch_hash=8cd08f54105771c47d21ae945a3836899a5dcf943d4e838da7f968fac15a08c6)(zod@3.25.76))(@ai-sdk/openai@2.0.64(patch_hash=b45bea4db6bd5366706df6df9aae2b2f3e611a0b0cc0409b5d1d6080701029d4)(zod@3.25.76))(ai@5.0.117(zod@3.25.76))(zod@3.25.76))(ai@5.0.117(zod@3.25.76))':
+     dependencies:
+-      '@ai-sdk/anthropic': 2.0.57(zod@4.3.4)
++      '@ai-sdk/anthropic': 2.0.57(patch_hash=7fdcb0ffe93c6ed62ec3d7bae4d6c5402d8753ab81b9e88c73d801b43dc4457d)(zod@4.3.4)
+       '@ai-sdk/azure': 2.0.91(zod@4.3.4)
+       '@ai-sdk/deepseek': 1.0.33(zod@4.3.4)
+       '@ai-sdk/google': 2.0.38(patch_hash=8cd08f54105771c47d21ae945a3836899a5dcf943d4e838da7f968fac15a08c6)(zod@3.25.76)
+@@ -11822,13 +11825,13 @@ snapshots:
+       '@ai-sdk/provider': 2.0.1
+       '@ai-sdk/provider-utils': 3.0.20(zod@4.3.4)
+       '@ai-sdk/xai': 2.0.43(zod@4.3.4)
+-      '@cherrystudio/ai-sdk-provider': 0.1.3(@ai-sdk/anthropic@2.0.57(zod@3.25.76))(@ai-sdk/google@2.0.38(patch_hash=8cd08f54105771c47d21ae945a3836899a5dcf943d4e838da7f968fac15a08c6)(zod@3.25.76))(@ai-sdk/openai@2.0.64(patch_hash=b45bea4db6bd5366706df6df9aae2b2f3e611a0b0cc0409b5d1d6080701029d4)(zod@3.25.76))(ai@5.0.117(zod@3.25.76))(zod@3.25.76)
++      '@cherrystudio/ai-sdk-provider': 0.1.3(@ai-sdk/anthropic@2.0.57(patch_hash=7fdcb0ffe93c6ed62ec3d7bae4d6c5402d8753ab81b9e88c73d801b43dc4457d)(zod@3.25.76))(@ai-sdk/google@2.0.38(patch_hash=8cd08f54105771c47d21ae945a3836899a5dcf943d4e838da7f968fac15a08c6)(zod@3.25.76))(@ai-sdk/openai@2.0.64(patch_hash=b45bea4db6bd5366706df6df9aae2b2f3e611a0b0cc0409b5d1d6080701029d4)(zod@3.25.76))(ai@5.0.117(zod@3.25.76))(zod@3.25.76)
+       ai: 5.0.117(zod@3.25.76)
+       zod: 4.3.4
+ 
+-  '@cherrystudio/ai-sdk-provider@0.1.3(@ai-sdk/anthropic@2.0.57(zod@3.25.76))(@ai-sdk/google@2.0.38(patch_hash=8cd08f54105771c47d21ae945a3836899a5dcf943d4e838da7f968fac15a08c6)(zod@3.25.76))(@ai-sdk/openai@2.0.64(patch_hash=b45bea4db6bd5366706df6df9aae2b2f3e611a0b0cc0409b5d1d6080701029d4)(zod@3.25.76))(ai@5.0.117(zod@3.25.76))(zod@3.25.76)':
++  '@cherrystudio/ai-sdk-provider@0.1.3(@ai-sdk/anthropic@2.0.57(patch_hash=7fdcb0ffe93c6ed62ec3d7bae4d6c5402d8753ab81b9e88c73d801b43dc4457d)(zod@3.25.76))(@ai-sdk/google@2.0.38(patch_hash=8cd08f54105771c47d21ae945a3836899a5dcf943d4e838da7f968fac15a08c6)(zod@3.25.76))(@ai-sdk/openai@2.0.64(patch_hash=b45bea4db6bd5366706df6df9aae2b2f3e611a0b0cc0409b5d1d6080701029d4)(zod@3.25.76))(ai@5.0.117(zod@3.25.76))(zod@3.25.76)':
+     dependencies:
+-      '@ai-sdk/anthropic': 2.0.57(zod@3.25.76)
++      '@ai-sdk/anthropic': 2.0.57(patch_hash=7fdcb0ffe93c6ed62ec3d7bae4d6c5402d8753ab81b9e88c73d801b43dc4457d)(zod@3.25.76)
+       '@ai-sdk/google': 2.0.38(patch_hash=8cd08f54105771c47d21ae945a3836899a5dcf943d4e838da7f968fac15a08c6)(zod@3.25.76)
+       '@ai-sdk/openai': 2.0.64(patch_hash=b45bea4db6bd5366706df6df9aae2b2f3e611a0b0cc0409b5d1d6080701029d4)(zod@3.25.76)
+       '@ai-sdk/provider': 2.0.1
+diff --git a/src/aiCore/index_new.ts b/src/aiCore/index_new.ts
+index 09ee4e1..6623318 100644
+--- a/src/aiCore/index_new.ts
++++ b/src/aiCore/index_new.ts
+@@ -104,7 +104,7 @@ export default class ModernAiProvider {
+     }
+ 
+     // 准备特殊配置
+-    await prepareSpecialProviderConfig(this.actualProvider, this.config!)
++    await prepareSpecialProviderConfig(this.actualProvider, this.config!, providerConfig.topicId)
+ 
+     // 提前创建本地 provider 实例
+     if (!this.localProvider) {
+diff --git a/src/aiCore/prepareParams/__tests__/clewdrFileProcessor.test.ts b/src/aiCore/prepareParams/__tests__/clewdrFileProcessor.test.ts
+new file mode 100644
+index 0000000..27877a1
+--- /dev/null
++++ b/src/aiCore/prepareParams/__tests__/clewdrFileProcessor.test.ts
+@@ -0,0 +1,89 @@
++import type { Model } from '@/types/assistant'
++import { FileTypes } from '@/types/file'
++import { type FileMessageBlock, MessageBlockStatus, MessageBlockType } from '@/types/message'
++
++import { convertFileBlockToFilePart } from '../fileProcessor'
++
++const mockBase64 = jest.fn().mockResolvedValue('UEsDBA==')
++const mockGetProviderByModel = jest.fn()
++
++jest.mock('expo-file-system', () => ({
++  File: jest.fn().mockImplementation(() => ({
++    base64: mockBase64,
++    type: 'application/zip'
++  }))
++}))
++
++jest.mock('@/services/ProviderService', () => ({
++  getProviderByModel: (...args: unknown[]) => mockGetProviderByModel(...args)
++}))
++
++jest.mock('@/modules/pdf-text-extractor', () => ({
++  extractPdfText: jest.fn()
++}))
++
++jest.mock('@/utils/messageUtils/find', () => ({
++  findFileBlocks: jest.fn()
++}))
++
++jest.mock('../modelCapabilities', () => ({
++  getFileSizeLimit: () => Number.MAX_SAFE_INTEGER,
++  supportsImageInput: () => false,
++  supportsLargeFileUpload: () => false,
++  supportsPdfInput: () => false
++}))
++
++jest.mock('@/aiCore/provider/factory', () => ({
++  getAiSdkProviderId: () => 'anthropic'
++}))
++
++const model: Model = {
++  id: 'claude-test',
++  name: 'Claude Test',
++  provider: 'clewdr',
++  group: 'Claude'
++}
++
++const zipBlock: FileMessageBlock = {
++  id: 'block-1',
++  messageId: 'message-1',
++  type: MessageBlockType.FILE,
++  status: MessageBlockStatus.SUCCESS,
++  createdAt: 1,
++  file: {
++    id: 'file-1',
++    name: 'project.zip',
++    origin_name: 'project.zip',
++    path: 'file:///documents/project.zip',
++    size: 4,
++    ext: '.zip',
++    type: FileTypes.DOCUMENT,
++    created_at: 1,
++    count: 1
++  }
++}
++
++describe('Clewdr file conversion', () => {
++  beforeEach(() => {
++    jest.clearAllMocks()
++  })
++
++  it('preserves complete arbitrary document bytes for the Clewdr provider', async () => {
++    mockGetProviderByModel.mockReturnValue({ id: 'clewdr' })
++
++    await expect(convertFileBlockToFilePart(zipBlock, model)).resolves.toEqual({
++      type: 'file',
++      data: 'UEsDBA==',
++      mediaType: 'application/zip',
++      filename: 'project.zip'
++    })
++    expect(mockBase64).toHaveBeenCalledTimes(1)
++  })
++
++  it('keeps the official Anthropic non-PDF fallback unchanged', async () => {
++    mockGetProviderByModel.mockReturnValue({ id: 'anthropic' })
++
++    await expect(convertFileBlockToFilePart(zipBlock, { ...model, provider: 'anthropic' })).resolves.toBeNull()
++    expect(mockBase64).not.toHaveBeenCalled()
++  })
++})
+diff --git a/src/aiCore/prepareParams/__tests__/clewdrTools.test.ts b/src/aiCore/prepareParams/__tests__/clewdrTools.test.ts
+new file mode 100644
+index 0000000..7c9ae85
+--- /dev/null
++++ b/src/aiCore/prepareParams/__tests__/clewdrTools.test.ts
+@@ -0,0 +1,103 @@
++import type { Assistant, Model, Provider } from '@/types/assistant'
++import type { MCPTool } from '@/types/tool'
++
++import { buildStreamTextParams } from '../parameterBuilder'
++
++const mockSetupToolsConfig = jest.fn((_tools?: MCPTool[]) => ({ local_tool: {} }))
++
++jest.mock('@/services/AssistantService', () => ({
++  getAssistantSettings: () => ({ maxTokens: 1024 }),
++  getDefaultModel: () => ({ id: 'fallback', name: 'fallback', provider: 'anthropic', group: 'test' })
++}))
++
++jest.mock('@/services/PreferenceService', () => ({
++  preferenceService: { get: jest.fn().mockResolvedValue(5) }
++}))
++
++jest.mock('@/config/models', () => ({
++  isGenerateImageModel: () => false,
++  isOpenRouterBuiltInWebSearchModel: () => false,
++  isReasoningModel: () => false,
++  isSupportedReasoningEffortModel: () => false,
++  isSupportedThinkingTokenClaudeModel: () => false,
++  isSupportedThinkingTokenModel: () => false,
++  isWebSearchModel: () => false
++}))
++
++jest.mock('@/aiCore/provider/factory', () => ({
++  getAiSdkProviderId: (provider: Provider) => provider.id
++}))
++
++jest.mock('@/aiCore/utils/mcp', () => ({
++  setupToolsConfig: (tools?: MCPTool[]) => mockSetupToolsConfig(tools)
++}))
++
++jest.mock('@/aiCore/utils/options', () => ({
++  buildProviderOptions: () => ({})
++}))
++
++jest.mock('@/aiCore/utils/reasoning', () => ({
++  getAnthropicThinkingBudget: () => 0
++}))
++
++jest.mock('../modelCapabilities', () => ({
++  supportsTopP: () => false
++}))
++
++jest.mock('../modelParameters', () => ({
++  getTemperature: () => undefined,
++  getTopP: () => undefined
++}))
++
++const model: Model = {
++  id: 'claude-test',
++  name: 'Claude Test',
++  provider: 'clewdr',
++  group: 'Claude'
++}
++
++const assistant: Assistant = {
++  id: 'assistant-1',
++  name: 'Assistant',
++  prompt: '',
++  topics: [],
++  type: 'system',
++  model,
++  enableWebSearch: true,
++  enableUrlContext: true
++}
++
++const tool = { name: 'local_tool' } as MCPTool
++
++function provider(id: string): Provider {
++  return {
++    id,
++    type: 'anthropic',
++    name: id,
++    apiKey: 'secret',
++    apiHost: `https://${id}.example/v1/`,
++    models: [{ ...model, provider: id }]
++  }
++}
++
++describe('Clewdr tool isolation', () => {
++  beforeEach(() => {
++    jest.clearAllMocks()
++  })
++
++  it('does not construct local or provider-native tools for Clewdr', async () => {
++    const result = await buildStreamTextParams([], assistant, provider('clewdr'), { mcpTools: [tool] })
++
++    expect(mockSetupToolsConfig).not.toHaveBeenCalled()
++    expect(result.params.tools).toBeUndefined()
++    expect(result.capabilities.enableWebSearch).toBe(false)
++    expect(result.capabilities.enableUrlContext).toBe(false)
++  })
++
++  it('keeps official Anthropic tool construction unchanged', async () => {
++    const result = await buildStreamTextParams([], assistant, provider('anthropic'), { mcpTools: [tool] })
++
++    expect(mockSetupToolsConfig).toHaveBeenCalledWith([tool])
++    expect(result.params.tools).toMatchObject({ local_tool: {} })
++  })
++})
+diff --git a/src/aiCore/prepareParams/fileProcessor.ts b/src/aiCore/prepareParams/fileProcessor.ts
+index 9482a75..cc0eb0a 100644
+--- a/src/aiCore/prepareParams/fileProcessor.ts
++++ b/src/aiCore/prepareParams/fileProcessor.ts
+@@ -179,6 +179,17 @@ export async function convertFileBlockToFilePart(fileBlock: FileMessageBlock, mo
+   const fileSizeLimit = getFileSizeLimit(model, file.type)
+ 
+   try {
++    const provider = getProviderByModel(model)
++    if (provider.id === 'clewdr') {
++      const nativeFile = new File(file.path)
++      return {
++        type: 'file',
++        data: await nativeFile.base64(),
++        mediaType: nativeFile.type || (file.type === FileTypes.IMAGE ? 'image/jpeg' : 'application/octet-stream'),
++        filename: file.origin_name
++      }
++    }
++
+     // 处理PDF文档
+     if (file.type === FileTypes.DOCUMENT && file.ext === '.pdf' && supportsPdfInput(model)) {
+       // 检查文件大小限制
+@@ -222,7 +233,6 @@ export async function convertFileBlockToFilePart(fileBlock: FileMessageBlock, mo
+ 
+       // 处理MIME类型，特别是jpg->jpeg的转换（Anthropic要求）
+       let mediaType = image.type
+-      const provider = getProviderByModel(model)
+       const aiSdkId = getAiSdkProviderId(provider)
+ 
+       if (aiSdkId === 'anthropic' && mediaType === 'image/jpg') {
+diff --git a/src/aiCore/prepareParams/parameterBuilder.ts b/src/aiCore/prepareParams/parameterBuilder.ts
+index 6ad1ab6..1e094f0 100644
+--- a/src/aiCore/prepareParams/parameterBuilder.ts
++++ b/src/aiCore/prepareParams/parameterBuilder.ts
+@@ -71,6 +71,7 @@ export async function buildStreamTextParams(
+ 
+   const model = assistant.model || getDefaultModel()
+   const aiSdkProviderId = getAiSdkProviderId(provider)
++  const isClewdr = provider.id === 'clewdr'
+ 
+   let { maxTokens } = getAssistantSettings(assistant)
+ 
+@@ -86,16 +87,17 @@ export async function buildStreamTextParams(
+   // 条件：没有外部搜索提供商 && (用户开启了内置搜索 || 模型强制使用内置搜索)
+   const hasExternalSearch = !!options.webSearchProviderId && options.webSearchProviderId !== 'builtin'
+   const enableWebSearch =
++    !isClewdr &&
+     !hasExternalSearch &&
+     ((assistant.enableWebSearch && isWebSearchModel(model)) ||
+       isOpenRouterBuiltInWebSearchModel(model) ||
+       model.id.includes('sonar'))
+ 
+-  const enableUrlContext = assistant.enableUrlContext || false
++  const enableUrlContext = !isClewdr && (assistant.enableUrlContext || false)
+ 
+   const enableGenerateImage = !!(isGenerateImageModel(model) && assistant.enableGenerateImage)
+ 
+-  let tools = setupToolsConfig(mcpTools)
++  let tools = isClewdr ? undefined : setupToolsConfig(mcpTools)
+ 
+   // 构建真正的 providerOptions
+   const webSearchConfig: CherryWebSearchConfig = {
+diff --git a/src/aiCore/provider/__tests__/clewdrAnthropicBoundary.test.ts b/src/aiCore/provider/__tests__/clewdrAnthropicBoundary.test.ts
+new file mode 100644
+index 0000000..d348771
+--- /dev/null
++++ b/src/aiCore/provider/__tests__/clewdrAnthropicBoundary.test.ts
+@@ -0,0 +1,125 @@
++import { createAnthropic } from '@ai-sdk/anthropic'
++import type { LanguageModelV2CallOptions, LanguageModelV2StreamPart } from '@ai-sdk/provider'
++
++import { createClewdrProvider } from '../clewdrProvider'
++
++type FetchInput = Parameters<typeof fetch>[0]
++type FetchInit = Parameters<typeof fetch>[1]
++
++const filePrompt: LanguageModelV2CallOptions = {
++  prompt: [
++    {
++      role: 'user',
++      content: [
++        {
++          type: 'file',
++          data: new Uint8Array([0x50, 0x4b, 0x03, 0x04]),
++          mediaType: 'application/zip',
++          filename: 'project.zip'
++        }
++      ]
++    }
++  ]
++}
++
++const textPrompt: LanguageModelV2CallOptions = {
++  prompt: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }]
++}
++
++async function captureBody(
++  createModel: (fetchFunction: typeof fetch) => ReturnType<ReturnType<typeof createAnthropic>['languageModel']>
++) {
++  let requestBody: Record<string, unknown> | undefined
++  const fetchFunction = jest.fn(async (_input: FetchInput, init?: FetchInit) => {
++    requestBody = JSON.parse(String(init?.body))
++    return streamResponse({ type: 'message_stop' })
++  }) as typeof fetch
++
++  await createModel(fetchFunction).doStream(filePrompt)
++  return requestBody
++}
++
++function streamResponse(event: unknown): Response {
++  const payload = new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`)
++  const body = new ReadableStream<Uint8Array>({
++    start(controller) {
++      controller.enqueue(payload)
++      controller.close()
++    }
++  })
++  return {
++    ok: true,
++    status: 200,
++    statusText: 'OK',
++    headers: new Headers({ 'content-type': 'text/event-stream' }),
++    body,
++    text: async () => new TextDecoder().decode(payload)
++  } as unknown as Response
++}
++
++async function streamChunks(providerName: 'clewdr' | 'anthropic.messages', event: unknown) {
++  const fetchFunction = (() => Promise.resolve(streamResponse(event))) as typeof fetch
++  const provider = createAnthropic({ apiKey: 'test', fetch: fetchFunction, name: providerName })
++  const result = await provider.languageModel('claude-test').doStream(textPrompt)
++  const chunks: LanguageModelV2StreamPart[] = []
++  const reader = result.stream.getReader()
++  while (true) {
++    const { done, value } = await reader.read()
++    if (done) break
++    chunks.push(value)
++  }
++  return chunks
++}
++
++describe('Clewdr Anthropic SDK boundary', () => {
++  it('serializes arbitrary Clewdr files without changing official Anthropic MIME validation', async () => {
++    const clewdrBody = await captureBody(fetchFunction =>
++      createClewdrProvider({
++        apiKey: 'test',
++        baseURL: 'https://clewdr.example/v1',
++        fetch: fetchFunction
++      }).languageModel('claude-test')
++    )
++
++    expect(clewdrBody).toMatchObject({
++      messages: [
++        {
++          content: [
++            {
++              type: 'document',
++              source: { type: 'base64', media_type: 'application/zip', data: 'UEsDBA==' },
++              title: 'project.zip'
++            }
++          ]
++        }
++      ]
++    })
++    await expect(
++      captureBody(fetchFunction =>
++        createAnthropic({
++          apiKey: 'test',
++          baseURL: 'https://api.anthropic.com/v1',
++          fetch: fetchFunction
++        }).languageModel('claude-test')
++      )
++    ).rejects.toThrow('media type: application/zip')
++  })
++
++  it.each([
++    { type: 'conversation_ready' },
++    {
++      type: 'content_block_delta',
++      index: 0,
++      delta: {
++        type: 'tool_use_block_update_delta',
++        message: 'Opening file',
++        display_content: { type: 'text', text: 'Opening file' }
++      }
++    }
++  ])('passes Clewdr-only event $type as raw while official Anthropic reports validation failure', async event => {
++    const clewdrChunks = await streamChunks('clewdr', event)
++    expect(clewdrChunks).toContainEqual({ type: 'raw', rawValue: event })
++
++    await expect(streamChunks('anthropic.messages', event)).rejects.toThrow('Type validation failed')
++  })
++})
+diff --git a/src/aiCore/provider/__tests__/clewdrIntegration.test.ts b/src/aiCore/provider/__tests__/clewdrIntegration.test.ts
+new file mode 100644
+index 0000000..3becbf8
+--- /dev/null
++++ b/src/aiCore/provider/__tests__/clewdrIntegration.test.ts
+@@ -0,0 +1,84 @@
++import { SYSTEM_PROVIDERS_CONFIG } from '@/config/providers'
++import { storage } from '@/utils'
++
++import { getClewdrClientId } from '../clewdrProvider'
++import { prepareSpecialProviderConfig } from '../providerConfig'
++import { NEW_PROVIDER_CONFIGS } from '../providerInitialization'
++
++jest.mock('expo/fetch', () => ({ fetch: jest.fn() }))
++
++jest.mock('@/services/ProviderService', () => ({
++  getProviderByModel: jest.fn()
++}))
++
++jest.mock('@/integration/cherryai', () => ({
++  generateSignature: jest.fn()
++}))
++
++jest.mock('../factory', () => ({
++  getAiSdkProviderId: (provider: { id: string }) => provider.id
++}))
++
++describe('Clewdr provider integration', () => {
++  beforeEach(() => {
++    storage.delete('clewdr.installation_client_id')
++    jest.clearAllMocks()
++  })
++
++  it('registers an identifiable provider whose models route back to Clewdr', () => {
++    const provider = SYSTEM_PROVIDERS_CONFIG.clewdr
++
++    expect(provider).toMatchObject({
++      id: 'clewdr',
++      type: 'anthropic',
++      apiHost: 'http://127.0.0.1:8484/v1/'
++    })
++    expect(provider.models.length).toBeGreaterThan(0)
++    expect(provider.models.every(model => model.provider === 'clewdr')).toBe(true)
++    expect(NEW_PROVIDER_CONFIGS).toContainEqual(
++      expect.objectContaining({ id: 'clewdr', creatorFunctionName: 'createClewdrProvider' })
++    )
++  })
++
++  it('persists one installation ID and injects the topic before provider creation', async () => {
++    const firstClientId = getClewdrClientId()
++    const secondClientId = getClewdrClientId()
++    const baseFetch = jest.fn()
++    const config = {
++      providerId: 'clewdr',
++      options: { baseURL: 'http://127.0.0.1:8484/v1/', apiKey: 'secret', fetch: baseFetch }
++    } as Parameters<typeof prepareSpecialProviderConfig>[1]
++
++    await prepareSpecialProviderConfig(SYSTEM_PROVIDERS_CONFIG.clewdr, config, 'topic-1')
++
++    expect(firstClientId).toBe(secondClientId)
++    expect(storage.set).toHaveBeenCalledTimes(1)
++    expect(config.options).toMatchObject({
++      clientId: firstClientId,
++      sessionId: 'topic-1',
++      normalizedEndpoint: 'http://127.0.0.1:8484/v1/'
++    })
++    expect(config.options.fetch).toBe(baseFetch)
++  })
++
++  it('fails closed without a topic and leaves official Anthropic configuration unchanged', async () => {
++    const clewdrConfig = {
++      providerId: 'clewdr',
++      options: { baseURL: 'http://127.0.0.1:8484/v1/', apiKey: 'secret' }
++    } as Parameters<typeof prepareSpecialProviderConfig>[1]
++    await expect(prepareSpecialProviderConfig(SYSTEM_PROVIDERS_CONFIG.clewdr, clewdrConfig)).rejects.toThrow(
++      'requires a topic ID'
++    )
++
++    const officialProvider = SYSTEM_PROVIDERS_CONFIG.anthropic
++    const officialConfig = {
++      providerId: 'anthropic',
++      options: { baseURL: 'https://api.anthropic.com/v1/', apiKey: 'secret' }
++    } as Parameters<typeof prepareSpecialProviderConfig>[1]
++    const before = { ...officialConfig.options }
++
++    await prepareSpecialProviderConfig(officialProvider, officialConfig)
++
++    expect(officialConfig.options).toEqual(before)
++  })
++})
+diff --git a/src/aiCore/provider/__tests__/clewdrProvider.test.ts b/src/aiCore/provider/__tests__/clewdrProvider.test.ts
+new file mode 100644
+index 0000000..bce68da
+--- /dev/null
++++ b/src/aiCore/provider/__tests__/clewdrProvider.test.ts
+@@ -0,0 +1,349 @@
++import type * as NodeCrypto from 'node:crypto'
++
++import * as Crypto from 'expo-crypto'
++
++import { createClewdrFetch, createClewdrSessionId, normalizeClewdrEndpoint } from '../clewdrProvider'
++
++jest.mock('expo-crypto', () => ({
++  CryptoDigestAlgorithm: { SHA256: 'SHA-256' },
++  digest: jest.fn(async (_algorithm: string, data: Uint8Array) => {
++    const { createHash } = jest.requireActual('node:crypto') as typeof NodeCrypto
++    const digest = createHash('sha256').update(data).digest()
++    return digest.buffer.slice(digest.byteOffset, digest.byteOffset + digest.byteLength)
++  })
++}))
++
++type JsonObject = Record<string, unknown>
++type FetchInput = Parameters<typeof fetch>[0]
++type FetchInit = Parameters<typeof fetch>[1]
++
++const endpoint = 'https://clewdr.example/api/v1'
++
++function jsonResponse(body: unknown, status = 200): Response {
++  return new Response(JSON.stringify(body), {
++    status,
++    headers: { 'content-type': 'application/json' }
++  })
++}
++
++function messageResponse(status = 200): Response {
++  return new Response('event: message_stop\ndata: {"type":"message_stop"}\n\n', {
++    status,
++    headers: { 'content-type': 'text/event-stream' }
++  })
++}
++
++function stagedFile(id: string) {
++  return {
++    id,
++    type: 'file',
++    filename: 'payload.bin',
++    mime_type: 'application/octet-stream',
++    size_bytes: 3
++  }
++}
++
++function messagesBody(overrides: JsonObject = {}): JsonObject {
++  return {
++    model: 'claude-test',
++    messages: [
++      {
++        role: 'user',
++        content: [
++          { type: 'text', text: 'inspect these files' },
++          {
++            type: 'document',
++            source: { type: 'base64', media_type: 'application/x-custom', data: 'AQID' },
++            title: 'folder\\payload.bin'
++          },
++          {
++            type: 'image',
++            source: { type: 'base64', media_type: 'image/webp', data: 'BAUG' }
++          }
++        ]
++      },
++      { role: 'assistant', content: [{ type: 'text', text: 'prior assistant context' }] }
++    ],
++    tools: [{ name: 'local_tool' }],
++    tool_choice: { type: 'auto' },
++    metadata: { trace_id: 'trace-1' },
++    ...overrides
++  }
++}
++
++function makeFetch(options: { messageStatuses?: number[]; uploadIds?: string[] } = {}) {
++  const messageStatuses = [...(options.messageStatuses ?? [200])]
++  const uploadIds = [...(options.uploadIds ?? ['file_clewdr_document', 'file_clewdr_image'])]
++  return jest.fn(async (input: FetchInput, _init?: FetchInit) => {
++    const url = String(input)
++    if (url.endsWith('/files')) {
++      return jsonResponse(stagedFile(uploadIds.shift() ?? 'file_clewdr_extra'))
++    }
++    if (url.endsWith('/sessions/reset')) {
++      return jsonResponse({ ok: true })
++    }
++    return messageResponse(messageStatuses.shift() ?? 200)
++  })
++}
++
++function createTestFetch(baseFetch: typeof fetch, topicId = 'topic-1', apiKey = 'secret') {
++  return createClewdrFetch({
++    endpoint,
++    apiKey,
++    clientId: 'installation-1',
++    topicId,
++    fetch: baseFetch
++  })
++}
++
++function messageCalls(baseFetch: jest.Mock) {
++  return baseFetch.mock.calls.filter(([input]) => String(input).endsWith('/messages'))
++}
++
++function uploadCalls(baseFetch: jest.Mock) {
++  return baseFetch.mock.calls.filter(([input]) => String(input).endsWith('/files'))
++}
++
++describe('Clewdr provider fetch', () => {
++  beforeEach(() => {
++    jest.clearAllMocks()
++  })
++
++  it('normalizes endpoints and derives deterministic, isolated session IDs', async () => {
++    expect(normalizeClewdrEndpoint('https://clewdr.example/api/v1///?ignored=1#fragment')).toBe(endpoint)
++
++    const first = await createClewdrSessionId('installation-1', endpoint, 'topic-1')
++    const repeated = await createClewdrSessionId('installation-1', `${endpoint}/`, 'topic-1')
++    const otherTopic = await createClewdrSessionId('installation-1', endpoint, 'topic-2')
++
++    expect(first).toBe(repeated)
++    expect(first).toMatch(/^cherry_topic_v1_[a-f0-9]{64}$/)
++    expect(otherTopic).not.toBe(first)
++    expect(Crypto.digest).toHaveBeenCalled()
++  })
++
++  it('uploads document and image sources, preserves message content, injects metadata, and strips tools', async () => {
++    const baseFetch = makeFetch()
++    const clewdrFetch = createTestFetch(baseFetch as typeof fetch)
++    const signal = new AbortController().signal
++
++    const response = await clewdrFetch(`${endpoint}/messages`, {
++      method: 'POST',
++      headers: {
++        authorization: 'Bearer secret',
++        'content-type': 'application/json',
++        'content-length': '999'
++      },
++      signal,
++      body: JSON.stringify(messagesBody())
++    })
++
++    expect(await response.text()).toContain('message_stop')
++    expect(uploadCalls(baseFetch)).toHaveLength(2)
++    for (const [, uploadInit] of uploadCalls(baseFetch)) {
++      expect(uploadInit.signal).toBe(signal)
++      const headers = new Headers(uploadInit.headers)
++      expect(headers.get('authorization')).toBe('Bearer secret')
++      expect(headers.has('content-type')).toBe(false)
++      expect(headers.has('content-length')).toBe(false)
++      expect(uploadInit.body).toBeInstanceOf(FormData)
++    }
++
++    const sent = JSON.parse(messageCalls(baseFetch)[0][1].body as string)
++    expect(sent.messages).toEqual([
++      {
++        role: 'user',
++        content: [
++          { type: 'text', text: 'inspect these files' },
++          {
++            type: 'document',
++            source: { type: 'file', file_id: 'file_clewdr_document' },
++            title: 'folder\\payload.bin'
++          },
++          { type: 'image', source: { type: 'file', file_id: 'file_clewdr_image' } }
++        ]
++      },
++      { role: 'assistant', content: [{ type: 'text', text: 'prior assistant context' }] }
++    ])
++    expect(sent.metadata).toEqual({
++      trace_id: 'trace-1',
++      user_id: await createClewdrSessionId('installation-1', endpoint, 'topic-1')
++    })
++    expect(sent).not.toHaveProperty('tools')
++    expect(sent).not.toHaveProperty('tool_choice')
++    const messageHeaders = new Headers(messageCalls(baseFetch)[0][1].headers)
++    expect(messageHeaders.has('content-length')).toBe(false)
++  })
++
++  it('deduplicates concurrent and completed uploads for the same session', async () => {
++    const baseFetch = makeFetch({ uploadIds: ['file_clewdr_shared'] })
++    const clewdrFetch = createTestFetch(baseFetch as typeof fetch, 'topic-deduplicate')
++    const body = messagesBody({
++      messages: [
++        {
++          role: 'user',
++          content: [
++            {
++              type: 'document',
++              source: { type: 'base64', media_type: 'application/x-dedupe', data: 'BwgJ' },
++              title: 'same.bin'
++            }
++          ]
++        }
++      ]
++    })
++
++    await Promise.all([
++      clewdrFetch(`${endpoint}/messages`, { method: 'POST', body: JSON.stringify(body) }),
++      clewdrFetch(`${endpoint}/messages`, { method: 'POST', body: JSON.stringify(body) })
++    ])
++    await clewdrFetch(`${endpoint}/messages`, { method: 'POST', body: JSON.stringify(body) })
++
++    expect(uploadCalls(baseFetch)).toHaveLength(1)
++    for (const [, init] of messageCalls(baseFetch)) {
++      const sent = JSON.parse(init.body as string)
++      expect(sent.messages[0].content[0].source).toEqual({ type: 'file', file_id: 'file_clewdr_shared' })
++    }
++  })
++
++  it('isolates the upload cache by endpoint, session, and principal', async () => {
++    const baseFetch = makeFetch({ uploadIds: ['file_a', 'file_b', 'file_c', 'file_d'] })
++    const body = messagesBody({
++      messages: [
++        {
++          role: 'user',
++          content: [
++            {
++              type: 'document',
++              source: { type: 'base64', media_type: 'application/x-isolated', data: 'CgsM' },
++              title: 'isolated.bin'
++            }
++          ]
++        }
++      ]
++    })
++
++    await createTestFetch(
++      baseFetch as typeof fetch,
++      'topic-cache-a',
++      'key-a'
++    )(`${endpoint}/messages`, {
++      method: 'POST',
++      body: JSON.stringify(body)
++    })
++    await createTestFetch(
++      baseFetch as typeof fetch,
++      'topic-cache-b',
++      'key-a'
++    )(`${endpoint}/messages`, {
++      method: 'POST',
++      body: JSON.stringify(body)
++    })
++    await createTestFetch(
++      baseFetch as typeof fetch,
++      'topic-cache-a',
++      'key-b'
++    )(`${endpoint}/messages`, {
++      method: 'POST',
++      body: JSON.stringify(body)
++    })
++    await createClewdrFetch({
++      endpoint: 'https://other-clewdr.example/v1',
++      apiKey: 'key-a',
++      clientId: 'installation-1',
++      topicId: 'topic-cache-a',
++      fetch: baseFetch as typeof fetch
++    })('https://other-clewdr.example/v1/messages', { method: 'POST', body: JSON.stringify(body) })
++
++    expect(uploadCalls(baseFetch)).toHaveLength(4)
++  })
++
++  it('does not cache failed or invalid uploads', async () => {
++    const baseFetch = jest
++      .fn()
++      .mockResolvedValueOnce(jsonResponse({ unexpected: true }))
++      .mockResolvedValueOnce(jsonResponse(stagedFile('file_clewdr_valid')))
++      .mockResolvedValue(messageResponse())
++    const clewdrFetch = createTestFetch(baseFetch as typeof fetch, 'topic-invalid-upload')
++    const body = messagesBody({
++      messages: [
++        {
++          role: 'user',
++          content: [
++            {
++              type: 'document',
++              source: { type: 'base64', media_type: 'application/x-invalid', data: 'DQ4P' },
++              title: 'invalid.bin'
++            }
++          ]
++        }
++      ]
++    })
++
++    await expect(clewdrFetch(`${endpoint}/messages`, { method: 'POST', body: JSON.stringify(body) })).rejects.toThrow(
++      'invalid response'
++    )
++    await expect(
++      clewdrFetch(`${endpoint}/messages`, { method: 'POST', body: JSON.stringify(body) })
++    ).resolves.toBeDefined()
++
++    expect(uploadCalls(baseFetch)).toHaveLength(2)
++  })
++
++  it('propagates 409 without reset or retry', async () => {
++    const baseFetch = makeFetch({ messageStatuses: [409] })
++    const response = await createTestFetch(baseFetch as typeof fetch, 'topic-conflict')(`${endpoint}/messages`, {
++      method: 'POST',
++      body: JSON.stringify(messagesBody({ messages: [] }))
++    })
++
++    expect(response.status).toBe(409)
++    expect(messageCalls(baseFetch)).toHaveLength(1)
++    expect(baseFetch.mock.calls.some(([input]) => String(input).endsWith('/sessions/reset'))).toBe(false)
++  })
++
++  it('resets once on 410 and retries the staged body without uploading again', async () => {
++    const baseFetch = makeFetch({ messageStatuses: [410, 200], uploadIds: ['file_clewdr_reused'] })
++    const body = messagesBody({
++      messages: [
++        {
++          role: 'user',
++          content: [
++            {
++              type: 'document',
++              source: { type: 'base64', media_type: 'application/x-reset', data: 'EBES' },
++              title: 'reset.bin'
++            }
++          ]
++        }
++      ]
++    })
++
++    const response = await createTestFetch(baseFetch as typeof fetch, 'topic-expired')(`${endpoint}/messages`, {
++      method: 'POST',
++      body: JSON.stringify(body)
++    })
++
++    expect(response.status).toBe(200)
++    expect(uploadCalls(baseFetch)).toHaveLength(1)
++    expect(messageCalls(baseFetch)).toHaveLength(2)
++    expect(messageCalls(baseFetch)[0][1].body).toBe(messageCalls(baseFetch)[1][1].body)
++    const resetCall = baseFetch.mock.calls.find(([input]) => String(input).endsWith('/sessions/reset'))
++    expect(resetCall).toBeDefined()
++    const resetInit = resetCall?.[1]
++    expect(JSON.parse(String(resetInit?.body))).toEqual({
++      session_id: await createClewdrSessionId('installation-1', endpoint, 'topic-expired')
++    })
++  })
++
++  it('passes through non-message requests without cloning the request options', async () => {
++    const baseFetch = makeFetch()
++    const init: NonNullable<FetchInit> = { method: 'GET', headers: { accept: 'application/json' } }
++    const clewdrFetch = createTestFetch(baseFetch as typeof fetch, 'topic-passthrough')
++
++    await clewdrFetch(`${endpoint}/models`, init)
++
++    expect(baseFetch).toHaveBeenCalledWith(`${endpoint}/models`, init)
++    expect(uploadCalls(baseFetch)).toHaveLength(0)
++  })
++})
+diff --git a/src/aiCore/provider/clewdrProvider.ts b/src/aiCore/provider/clewdrProvider.ts
+new file mode 100644
+index 0000000..dc07d61
+--- /dev/null
++++ b/src/aiCore/provider/clewdrProvider.ts
+@@ -0,0 +1,312 @@
++import { type AnthropicProvider, type AnthropicProviderSettings, createAnthropic } from '@ai-sdk/anthropic'
++import * as Crypto from 'expo-crypto'
++
++import { storage, uuid } from '@/utils'
++
++const CLEWDR_CLIENT_ID_KEY = 'clewdr.installation_client_id'
++const CLEWDR_SESSION_PREFIX = 'cherry_topic_v1_'
++const CLEWDR_SESSION_DOMAIN = 'clewdr-cherry-session-v1'
++const MAX_UPLOAD_CACHE_ENTRIES = 1024
++
++type FetchFunction = typeof globalThis.fetch
++type FetchInput = Parameters<FetchFunction>[0]
++type FetchInit = Parameters<FetchFunction>[1]
++type HeadersInput = ConstructorParameters<typeof Headers>[0]
++type JsonObject = Record<string, unknown>
++
++interface UploadCacheEntry {
++  promise: Promise<string>
++  settled: boolean
++}
++
++interface StagedFileResponse {
++  id: string
++  type: 'file'
++  filename: string
++  mime_type: string
++  size_bytes: number
++}
++
++interface ClewdrFetchSettings {
++  endpoint: string
++  apiKey?: string
++  clientId: string
++  topicId: string
++  fetch: FetchFunction
++}
++
++interface RewriteContext {
++  endpoint: string
++  fetchIdentity: number
++  principalDigest: string
++  wireSessionId: string
++  headers: Headers
++  signal: AbortSignal | null | undefined
++  fetch: FetchFunction
++}
++
++export interface ClewdrProviderSettings extends AnthropicProviderSettings {
++  clientId?: string
++  sessionId?: string
++  normalizedEndpoint?: string
++}
++
++const uploadCache = new Map<string, UploadCacheEntry>()
++const fetchIdentities = new WeakMap<FetchFunction, number>()
++let nextFetchIdentity = 1
++
++export function getClewdrClientId(): string {
++  const existing = storage.getString(CLEWDR_CLIENT_ID_KEY)
++  if (existing) return existing
++
++  const clientId = uuid()
++  storage.set(CLEWDR_CLIENT_ID_KEY, clientId)
++  return clientId
++}
++
++export function normalizeClewdrEndpoint(endpoint: string): string {
++  const url = new URL(endpoint)
++  url.search = ''
++  url.hash = ''
++  url.pathname = url.pathname.replace(/\/+$/, '')
++  return url.toString().replace(/\/$/, '')
++}
++
++export async function createClewdrSessionId(clientId: string, endpoint: string, topicId: string): Promise<string> {
++  const normalizedEndpoint = normalizeClewdrEndpoint(endpoint)
++  const digest = await sha256(`${CLEWDR_SESSION_DOMAIN}\0${clientId}\0${normalizedEndpoint}\0${topicId}`)
++  return `${CLEWDR_SESSION_PREFIX}${digest}`
++}
++
++export function createClewdrProvider(options: ClewdrProviderSettings = {}): AnthropicProvider {
++  const { clientId, sessionId, normalizedEndpoint, fetch: customFetch, ...anthropicOptions } = options
++  let providerFetch = customFetch
++
++  if (sessionId !== undefined) {
++    if (!clientId) throw new Error('Clewdr session preparation requires a persisted installation ID')
++    if (!sessionId) throw new Error('Clewdr session preparation requires a topic ID')
++
++    providerFetch = createClewdrFetch({
++      endpoint: normalizedEndpoint ?? anthropicOptions.baseURL ?? '',
++      apiKey: anthropicOptions.apiKey,
++      clientId,
++      topicId: sessionId,
++      fetch: customFetch ?? globalThis.fetch
++    })
++  }
++
++  return createAnthropic({ ...anthropicOptions, fetch: providerFetch, name: 'clewdr' })
++}
++
++export function createClewdrFetch(settings: ClewdrFetchSettings): FetchFunction {
++  const endpoint = normalizeClewdrEndpoint(settings.endpoint)
++  const sessionIdPromise = createClewdrSessionId(settings.clientId, endpoint, settings.topicId)
++  const principalDigestPromise = sha256(settings.apiKey ?? '')
++  const fetchIdentity = getFetchIdentity(settings.fetch)
++
++  return async (input, init) => {
++    if (!isMessagesRequest(input) || typeof init?.body !== 'string') return settings.fetch(input, init)
++
++    const parsed: unknown = JSON.parse(init.body)
++    if (!isJsonObject(parsed)) return settings.fetch(input, init)
++
++    const [wireSessionId, principalDigest] = await Promise.all([sessionIdPromise, principalDigestPromise])
++    const messageHeaders = mergeHeaders(input, init.headers)
++    await rewriteFileSources(parsed, {
++      endpoint,
++      fetchIdentity,
++      principalDigest,
++      wireSessionId,
++      headers: messageHeaders,
++      signal: init.signal,
++      fetch: settings.fetch
++    })
++
++    parsed.metadata = {
++      ...(isJsonObject(parsed.metadata) ? parsed.metadata : {}),
++      user_id: wireSessionId
++    }
++    delete parsed.tools
++    delete parsed.tool_choice
++
++    messageHeaders.delete('content-length')
++    const rewrittenInit: NonNullable<FetchInit> = { ...init, body: JSON.stringify(parsed), headers: messageHeaders }
++    const response = await settings.fetch(input, rewrittenInit)
++    if (response.status !== 410) return response
++
++    if (response.body) await response.body.cancel().catch(() => undefined)
++    const resetHeaders = new Headers(messageHeaders)
++    resetHeaders.set('content-type', 'application/json')
++    resetHeaders.delete('content-length')
++    const resetResponse = await settings.fetch(`${endpoint}/sessions/reset`, {
++      method: 'POST',
++      body: JSON.stringify({ session_id: wireSessionId }),
++      headers: resetHeaders,
++      signal: init.signal
++    })
++    if (!resetResponse.ok) return resetResponse
++
++    return settings.fetch(input, rewrittenInit)
++  }
++}
++
++async function rewriteFileSources(body: JsonObject, context: RewriteContext): Promise<void> {
++  if (!Array.isArray(body.messages)) return
++
++  const rewrites: Promise<void>[] = []
++  for (const message of body.messages) {
++    if (!isJsonObject(message) || !Array.isArray(message.content)) continue
++    for (const part of message.content) {
++      if (!isJsonObject(part) || !isJsonObject(part.source)) continue
++      const source = part.source
++      if (source.type !== 'base64' || typeof source.data !== 'string' || typeof source.media_type !== 'string') {
++        continue
++      }
++
++      const filename = normalizeFilename(typeof part.title === 'string' ? part.title : 'file')
++      rewrites.push(
++        stageFile(source.data, filename, source.media_type, context).then(fileId => {
++          part.source = { type: 'file', file_id: fileId }
++        })
++      )
++    }
++  }
++  await Promise.all(rewrites)
++}
++
++async function stageFile(data: string, filename: string, mediaType: string, context: RewriteContext): Promise<string> {
++  const bytes = decodeBase64(data)
++  const fileDigest = await sha256(bytes)
++  const cacheKey = JSON.stringify([
++    context.fetchIdentity,
++    context.endpoint,
++    context.principalDigest,
++    context.wireSessionId,
++    fileDigest,
++    filename,
++    mediaType
++  ])
++  const cached = uploadCache.get(cacheKey)
++  if (cached) {
++    uploadCache.delete(cacheKey)
++    uploadCache.set(cacheKey, cached)
++    return cached.promise
++  }
++
++  reserveUploadCacheEntry()
++  const entry: UploadCacheEntry = {
++    settled: false,
++    promise: uploadFile(bytes, filename, mediaType, context).then(
++      fileId => {
++        entry.settled = true
++        return fileId
++      },
++      error => {
++        if (uploadCache.get(cacheKey) === entry) uploadCache.delete(cacheKey)
++        throw error
++      }
++    )
++  }
++  uploadCache.set(cacheKey, entry)
++  return entry.promise
++}
++
++async function uploadFile(
++  bytes: Uint8Array,
++  filename: string,
++  mediaType: string,
++  context: RewriteContext
++): Promise<string> {
++  const blobBytes = new Uint8Array(bytes.byteLength)
++  blobBytes.set(bytes)
++  const form = new FormData()
++  form.append('file', new Blob([blobBytes.buffer as ArrayBuffer], { type: mediaType }), filename)
++
++  const headers = new Headers(context.headers)
++  headers.delete('content-type')
++  headers.delete('content-length')
++  const response = await context.fetch(`${context.endpoint}/files`, {
++    method: 'POST',
++    body: form,
++    headers,
++    signal: context.signal
++  })
++  if (!response.ok) {
++    const detail = await response.text()
++    throw new Error(`Clewdr file upload failed with HTTP ${response.status}: ${detail}`)
++  }
++
++  const payload: unknown = await response.json()
++  if (!isStagedFileResponse(payload)) throw new Error('Clewdr file upload returned an invalid response')
++  return payload.id
++}
++
++function decodeBase64(data: string): Uint8Array {
++  const binary = atob(data)
++  const bytes = new Uint8Array(binary.length)
++  for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index)
++  return bytes
++}
++
++async function sha256(value: string | Uint8Array): Promise<string> {
++  const source = typeof value === 'string' ? new TextEncoder().encode(value) : value
++  const bytes = new Uint8Array(source.byteLength)
++  bytes.set(source)
++  const digest = await Crypto.digest(Crypto.CryptoDigestAlgorithm.SHA256, bytes)
++  return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('')
++}
++
++function normalizeFilename(filename: string): string {
++  const basename = filename.replaceAll('\\', '/').split('/').filter(Boolean).at(-1) ?? 'file'
++  const printable = [...basename].filter(character => {
++    const codePoint = character.codePointAt(0) ?? 0
++    return codePoint > 0x1f && codePoint !== 0x7f
++  })
++  return printable.join('').trim() || 'file'
++}
++
++function mergeHeaders(input: FetchInput, headers: HeadersInput | undefined): Headers {
++  const requestHeaders = typeof Request !== 'undefined' && input instanceof Request ? input.headers : undefined
++  const merged = new Headers(requestHeaders)
++  new Headers(headers).forEach((value, key) => merged.set(key, value))
++  return merged
++}
++
++function getFetchIdentity(fetchFunction: FetchFunction): number {
++  const existing = fetchIdentities.get(fetchFunction)
++  if (existing !== undefined) return existing
++  const identity = nextFetchIdentity++
++  fetchIdentities.set(fetchFunction, identity)
++  return identity
++}
++
++function reserveUploadCacheEntry(): void {
++  if (uploadCache.size < MAX_UPLOAD_CACHE_ENTRIES) return
++  const settled = uploadCache.entries().find(([, entry]) => entry.settled)
++  if (!settled) throw new Error('Clewdr file upload cache is busy')
++  uploadCache.delete(settled[0])
++}
++
++function isMessagesRequest(input: FetchInput): boolean {
++  const url = typeof Request !== 'undefined' && input instanceof Request ? input.url : String(input)
++  try {
++    return new URL(url).pathname.replace(/\/+$/, '').endsWith('/messages')
++  } catch {
++    return false
++  }
++}
++
++function isJsonObject(value: unknown): value is JsonObject {
++  return typeof value === 'object' && value !== null && !Array.isArray(value)
++}
++
++function isStagedFileResponse(value: unknown): value is StagedFileResponse {
++  return (
++    isJsonObject(value) &&
++    typeof value.id === 'string' &&
++    value.type === 'file' &&
++    typeof value.filename === 'string' &&
++    typeof value.mime_type === 'string' &&
++    typeof value.size_bytes === 'number'
++  )
++}
+diff --git a/src/aiCore/provider/providerConfig.ts b/src/aiCore/provider/providerConfig.ts
+index 6154c35..2e4ec08 100644
+--- a/src/aiCore/provider/providerConfig.ts
++++ b/src/aiCore/provider/providerConfig.ts
+@@ -12,6 +12,7 @@ import { isSystemProvider, type Model, type Provider } from '@/types/assistant'
+ import { storage } from '@/utils'
+ import { formatApiHost } from '@/utils/api'
+ 
++import { type ClewdrProviderSettings, getClewdrClientId } from './clewdrProvider'
+ import { aihubmixProviderCreator, newApiResolverCreator, vertexAnthropicProviderCreator } from './config'
+ import { getAiSdkProviderId } from './factory'
+ 
+@@ -249,10 +250,20 @@ export function isModernSdkSupported(provider: Provider): boolean {
+  */
+ export async function prepareSpecialProviderConfig(
+   provider: Provider,
+-  config: ReturnType<typeof providerToAiSdkConfig>
++  config: ReturnType<typeof providerToAiSdkConfig>,
++  topicId?: string
+ ) {
+   // todo
+   switch (provider.id) {
++    case 'clewdr': {
++      if (!topicId) throw new Error('Clewdr requires a topic ID for explicit session reuse')
++      const options = config.options as ClewdrProviderSettings
++      options.clientId = getClewdrClientId()
++      options.sessionId = topicId
++      options.normalizedEndpoint = provider.apiHost
++      break
++    }
++
+     // case 'copilot': {
+     //   const defaultHeaders = store.getState().copilot.defaultHeaders
+     //   const { token } = await window.api.copilot.getToken(defaultHeaders)
+diff --git a/src/aiCore/provider/providerInitialization.ts b/src/aiCore/provider/providerInitialization.ts
+index c18fc39..a28677e 100644
+--- a/src/aiCore/provider/providerInitialization.ts
++++ b/src/aiCore/provider/providerInitialization.ts
+@@ -9,6 +9,14 @@ const logger = loggerService.withContext('ProviderConfigs')
+  * 定义了需要动态注册的AI Providers
+  */
+ export const NEW_PROVIDER_CONFIGS: ProviderConfig[] = [
++  {
++    id: 'clewdr',
++    name: 'ClewdR',
++    import: () => import('./clewdrProvider'),
++    creatorFunctionName: 'createClewdrProvider',
++    supportsImageGeneration: false,
++    aliases: ['clewdr']
++  },
+   {
+     id: 'openrouter',
+     name: 'OpenRouter',
+diff --git a/src/config/models/default.ts b/src/config/models/default.ts
+index 8ea769f..eb38d50 100644
+--- a/src/config/models/default.ts
++++ b/src/config/models/default.ts
+@@ -27,6 +27,7 @@ export const SYSTEM_MODELS: Record<SystemProviderId | 'defaultModel', Model[]> =
+   ],
+   cherryin: [],
+   vertexai: [],
++  clewdr: [],
+   sophnet: [],
+   '302ai': [
+     {
+diff --git a/src/config/providers.ts b/src/config/providers.ts
+index 4df10b2..b96f065 100644
+--- a/src/config/providers.ts
++++ b/src/config/providers.ts
+@@ -251,6 +251,16 @@ export const SYSTEM_PROVIDERS_CONFIG: Record<SystemProviderId, SystemProvider> =
+     isSystem: true,
+     enabled: false
+   },
++  clewdr: {
++    id: 'clewdr',
++    name: 'ClewdR',
++    type: 'anthropic',
++    apiKey: '',
++    apiHost: 'http://127.0.0.1:8484/v1/',
++    models: SYSTEM_MODELS.anthropic.map(model => ({ ...model, provider: 'clewdr' })),
++    isSystem: true,
++    enabled: false
++  },
+   anthropic: {
+     id: 'anthropic',
+     name: 'Anthropic',
+@@ -1017,6 +1027,15 @@ export const PROVIDER_URLS: Record<SystemProviderId, ProviderUrls> = {
+       models: 'https://docs.anthropic.com/en/docs/about-claude/models'
+     }
+   },
++  clewdr: {
++    api: {
++      url: 'http://127.0.0.1:8484/v1/'
++    },
++    websites: {
++      official: 'https://github.com/Xerxes-2/clewdr',
++      docs: 'https://github.com/Xerxes-2/clewdr/wiki'
++    }
++  },
+   grok: {
+     api: {
+       url: 'https://api.x.ai'
+diff --git a/src/services/AppInitializationService.ts b/src/services/AppInitializationService.ts
+index 997d28a..3f22a6a 100644
+--- a/src/services/AppInitializationService.ts
++++ b/src/services/AppInitializationService.ts
+@@ -107,6 +107,14 @@ const APP_DATA_MIGRATIONS: AppDataMigration[] = [
+ 
+       logger.info(`AI Gateway provider host updated to ${desiredHost}`)
+     }
++  },
++  {
++    version: 4,
++    app_version: '0.1.7',
++    description: 'Add the Clewdr provider',
++    migrate: async () => {
++      await providerDatabase.upsertProviders([SYSTEM_PROVIDERS_CONFIG.clewdr])
++    }
+   }
+ ]
+ 
+diff --git a/src/types/assistant.ts b/src/types/assistant.ts
+index 16ea9a0..1650681 100644
+--- a/src/types/assistant.ts
++++ b/src/types/assistant.ts
+@@ -306,6 +306,7 @@ export const SystemProviderIds = {
+   ovms: 'ovms',
+   'new-api': 'new-api',
+   lmstudio: 'lmstudio',
++  clewdr: 'clewdr',
+   anthropic: 'anthropic',
+   openai: 'openai',
+   'azure-openai': 'azure-openai',
+diff --git a/src/utils/icons/index.ts b/src/utils/icons/index.ts
+index ad3e209..99ea44c 100644
+--- a/src/utils/icons/index.ts
++++ b/src/utils/icons/index.ts
+@@ -131,6 +131,7 @@ const PROVIDER_ICONS_DARK: Record<SystemProviderId | 'default' | 'cherryai', Ima
+   ollama: require('@/assets/images/llmIcons/dark/ollama.png'),
+   'new-api': require('@/assets/images/llmIcons/dark/newapi.png'),
+   lmstudio: require('@/assets/images/llmIcons/dark/lmstudio.png'),
++  clewdr: require('@/assets/images/llmIcons/dark/anthropic.png'),
+   anthropic: require('@/assets/images/llmIcons/dark/anthropic.png'),
+   openai: require('@/assets/images/llmIcons/dark/openai.png'),
+   'azure-openai': require('@/assets/images/llmIcons/dark/azure.png'),
+@@ -196,6 +197,7 @@ const PROVIDER_ICONS_LIGHT: Record<SystemProviderId | 'default' | 'cherryai', Im
+   ollama: require('@/assets/images/llmIcons/light/ollama.png'),
+   'new-api': require('@/assets/images/llmIcons/light/newapi.png'),
+   lmstudio: require('@/assets/images/llmIcons/light/lmstudio.png'),
++  clewdr: require('@/assets/images/llmIcons/light/anthropic.png'),
+   anthropic: require('@/assets/images/llmIcons/light/anthropic.png'),
+   openai: require('@/assets/images/llmIcons/light/openai.png'),
+   'azure-openai': require('@/assets/images/llmIcons/light/azure.png'),

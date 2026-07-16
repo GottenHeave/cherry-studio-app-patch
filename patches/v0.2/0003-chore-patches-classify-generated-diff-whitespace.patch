@@ -1,0 +1,19 @@
+From b0cbb957d839f6b005f460fc00cee76c7398bfc4 Mon Sep 17 00:00:00 2001
+From: GottenHeave <274621501+GottenHeave@users.noreply.github.com>
+Date: Thu, 16 Jul 2026 17:45:16 +0000
+Subject: [PATCH 3/5] chore(patches): classify generated diff whitespace
+
+Signed-off-by: GottenHeave <274621501+GottenHeave@users.noreply.github.com>
+---
+ .gitattributes | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/.gitattributes b/.gitattributes
+index 94f480d..0178bbf 100644
+--- a/.gitattributes
++++ b/.gitattributes
+@@ -1 +1,2 @@
+-* text=auto eol=lf
+\ No newline at end of file
++* text=auto eol=lf
++patches/*.patch whitespace=-trailing-space

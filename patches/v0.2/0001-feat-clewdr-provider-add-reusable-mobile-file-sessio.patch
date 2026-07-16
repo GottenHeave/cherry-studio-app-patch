@@ -1,0 +1,2022 @@
+From bd18a0c6f82a3a20ef9c33973d705447c1c263b5 Mon Sep 17 00:00:00 2001
+From: GottenHeave <274621501+GottenHeave@users.noreply.github.com>
+Date: Thu, 16 Jul 2026 17:18:04 +0000
+Subject: [PATCH 1/5] feat(clewdr-provider): add reusable mobile file sessions
+
+Signed-off-by: GottenHeave <274621501+GottenHeave@users.noreply.github.com>
+---
+ .../provider-registry/data/providers.json     |  24 +-
+ .../provider-registry/src/providers/clewdr.ts |  23 +
+ .../provider-registry/src/providers/index.ts  |   2 +
+ patches/@ai-sdk__anthropic@3.0.79.patch       | 436 ++++++++++++++++++
+ pnpm-lock.yaml                                |   9 +-
+ pnpm-workspace.yaml                           |   1 +
+ src/ai/AiService.ts                           |  47 +-
+ src/ai/__tests__/AiService.test.ts            |  73 ++-
+ .../provider/__tests__/clewdrRegistry.test.ts |  84 ++++
+ src/ai/provider/config.ts                     |   9 +-
+ .../clewdrAnthropicCompatibility.test.ts      | 230 +++++++++
+ .../__tests__/clewdrInstallation.test.ts      |  81 ++++
+ .../custom/__tests__/clewdrProvider.test.ts   | 338 ++++++++++++++
+ src/ai/provider/custom/clewdrInstallation.ts  |  31 ++
+ src/ai/provider/custom/clewdrProvider.ts      | 306 ++++++++++++
+ src/ai/provider/custom/clewdrUploadCache.ts   |  45 ++
+ src/ai/provider/extensions/index.ts           |   9 +
+ 17 files changed, 1723 insertions(+), 25 deletions(-)
+ create mode 100644 packages/provider-registry/src/providers/clewdr.ts
+ create mode 100644 patches/@ai-sdk__anthropic@3.0.79.patch
+ create mode 100644 src/ai/provider/__tests__/clewdrRegistry.test.ts
+ create mode 100644 src/ai/provider/custom/__tests__/clewdrAnthropicCompatibility.test.ts
+ create mode 100644 src/ai/provider/custom/__tests__/clewdrInstallation.test.ts
+ create mode 100644 src/ai/provider/custom/__tests__/clewdrProvider.test.ts
+ create mode 100644 src/ai/provider/custom/clewdrInstallation.ts
+ create mode 100644 src/ai/provider/custom/clewdrProvider.ts
+ create mode 100644 src/ai/provider/custom/clewdrUploadCache.ts
+
+diff --git a/packages/provider-registry/data/providers.json b/packages/provider-registry/data/providers.json
+index 0a841d1..187dbbb 100644
+--- a/packages/provider-registry/data/providers.json
++++ b/packages/provider-registry/data/providers.json
+@@ -471,6 +471,28 @@
+       },
+       "name": "LM Studio"
+     },
++    {
++      "defaultChatEndpoint": "anthropic-messages",
++      "description": "ClewdR - AI model provider",
++      "endpointConfigs": {
++        "anthropic-messages": {
++          "adapterFamily": "clewdr",
++          "baseUrl": "http://127.0.0.1:8484/v1"
++        },
++        "openai-chat-completions": {
++          "adapterFamily": "openai-compatible",
++          "baseUrl": "http://127.0.0.1:8484/v1"
++        }
++      },
++      "id": "clewdr",
++      "metadata": {
++        "website": {
++          "docs": "https://github.com/Xerxes-2/clewdr/wiki",
++          "official": "https://github.com/Xerxes-2/clewdr"
++        }
++      },
++      "name": "ClewdR"
++    },
+     {
+       "defaultChatEndpoint": "anthropic-messages",
+       "description": "Anthropic - AI model provider",
+@@ -1389,5 +1411,5 @@
+       "presetProviderId": "minimax"
+     }
+   ],
+-  "version": "0544e8f799859c83"
++  "version": "e3379fdab592687d"
+ }
+diff --git a/packages/provider-registry/src/providers/clewdr.ts b/packages/provider-registry/src/providers/clewdr.ts
+new file mode 100644
+index 0000000..b62182e
+--- /dev/null
++++ b/packages/provider-registry/src/providers/clewdr.ts
+@@ -0,0 +1,23 @@
++import { defineProvider } from './types';
++
++export default defineProvider({
++  id: 'clewdr',
++  name: 'ClewdR',
++  defaultChatEndpoint: 'anthropic-messages',
++  endpointConfigs: {
++    'anthropic-messages': {
++      adapterFamily: 'clewdr',
++      baseUrl: 'http://127.0.0.1:8484/v1',
++    },
++    'openai-chat-completions': {
++      adapterFamily: 'openai-compatible',
++      baseUrl: 'http://127.0.0.1:8484/v1',
++    },
++  },
++  metadata: {
++    website: {
++      docs: 'https://github.com/Xerxes-2/clewdr/wiki',
++      official: 'https://github.com/Xerxes-2/clewdr',
++    },
++  },
++});
+diff --git a/packages/provider-registry/src/providers/index.ts b/packages/provider-registry/src/providers/index.ts
+index fa626c2..b868131 100644
+--- a/packages/provider-registry/src/providers/index.ts
++++ b/packages/provider-registry/src/providers/index.ts
+@@ -10,6 +10,7 @@ import p_baidu_cloud from './baidu-cloud';
+ import p_burncloud from './burncloud';
+ import p_cerebras from './cerebras';
+ import p_cherryin from './cherryin';
++import p_clewdr from './clewdr';
+ import p_copilot from './copilot';
+ import p_dashscope from './dashscope';
+ import p_deepseek from './deepseek';
+@@ -86,6 +87,7 @@ export const PROVIDERS: Provider[] = [
+   p_ollama,
+   p_new_api,
+   p_lmstudio,
++  p_clewdr,
+   p_anthropic,
+   p_openai,
+   p_opencode,
+diff --git a/patches/@ai-sdk__anthropic@3.0.79.patch b/patches/@ai-sdk__anthropic@3.0.79.patch
+new file mode 100644
+index 0000000..996ea87
+--- /dev/null
++++ b/patches/@ai-sdk__anthropic@3.0.79.patch
+@@ -0,0 +1,436 @@
++diff --git a/dist/index.js b/dist/index.js
++index 98e61eaa643c184325922a2e582ad4383533465d..c406a66576c1a7f56fa9ee1f873f6d860e77721e 100644
++--- a/dist/index.js
+++++ b/dist/index.js
++@@ -2176,7 +2176,8 @@ async function convertToAnthropicMessagesPrompt({
++   sendReasoning,
++   warnings,
++   cacheControlValidator,
++-  toolNameMapping
+++  toolNameMapping,
+++  clewdr = false
++ }) {
++   var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n, _o, _p, _q, _r, _s, _t, _u;
++   const betas = /* @__PURE__ */ new Set();
++@@ -2314,8 +2315,22 @@ async function convertToAnthropicMessagesPrompt({
++                         cache_control: cacheControl
++                       });
++                     } else {
++-                      throw new import_provider2.UnsupportedFunctionalityError({
++-                        functionality: `media type: ${part.mediaType}`
+++                      if (!clewdr) {
+++                        throw new import_provider2.UnsupportedFunctionalityError({
+++                          functionality: `media type: ${part.mediaType}`
+++                        });
+++                      }
+++                      const metadata = await getDocumentMetadata(part.providerOptions);
+++                      anthropicContent.push({
+++                        type: "document",
+++                        source: {
+++                          type: "base64",
+++                          media_type: part.mediaType,
+++                          data: (0, import_provider_utils14.convertToBase64)(part.data)
+++                        },
+++                        title: metadata.title || part.filename || "file",
+++                        ...metadata.context && { context: metadata.context },
+++                        cache_control: cacheControl
++                       });
++                     }
++                     break;
++@@ -3230,6 +3245,16 @@ function createCitationSource(citation, citationDocuments, generateId3) {
++     }
++   };
++ }
+++function isRecord(value) {
+++  return typeof value === "object" && value !== null && !Array.isArray(value);
+++}
+++function isClewdrExtensionEvent(value) {
+++  if (!isRecord(value)) return false;
+++  if (value.type === "conversation_ready") return true;
+++  if (value.type === "message_limit") return isRecord(value.message_limit);
+++  if (value.type !== "content_block_delta" || !isRecord(value.delta)) return false;
+++  return value.delta.type === "tool_use_block_update_delta" || value.delta.type === "thinking_cut_off_delta";
+++}
++ var AnthropicMessagesLanguageModel = class {
++   constructor(modelId, config) {
++     this.specificationVersion = "v3";
++@@ -3395,12 +3420,14 @@ var AnthropicMessagesLanguageModel = class {
++         "anthropic.advisor_20260301": "advisor"
++       }
++     });
+++    const clewdr = this.config.provider === "clewdr";
++     const { prompt: messagesPrompt, betas } = await convertToAnthropicMessagesPrompt({
++       prompt,
++       sendReasoning: (_d = anthropicOptions == null ? void 0 : anthropicOptions.sendReasoning) != null ? _d : true,
++       warnings,
++       cacheControlValidator,
++-      toolNameMapping
+++      toolNameMapping,
+++      clewdr
++     });
++     const thinkingType = (_e = anthropicOptions == null ? void 0 : anthropicOptions.thinking) == null ? void 0 : _e.type;
++     const isThinking = thinkingType === "enabled" || thinkingType === "adaptive";
++@@ -4270,6 +4297,7 @@ var AnthropicMessagesLanguageModel = class {
++     let isJsonResponseFromTool = false;
++     let blockType = void 0;
++     const generateId3 = this.generateId;
+++    const clewdr = this.config.provider === "clewdr";
++     const transformedStream = response.pipeThrough(
++       new TransformStream({
++         start(controller) {
++@@ -4277,13 +4305,20 @@ var AnthropicMessagesLanguageModel = class {
++         },
++         transform(chunk, controller) {
++           var _a2, _b2, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n;
++-          if (options.includeRawChunks) {
++-            controller.enqueue({ type: "raw", rawValue: chunk.rawValue });
++-          }
++           if (!chunk.success) {
+++            if (clewdr && isClewdrExtensionEvent(chunk.rawValue)) {
+++              controller.enqueue({ type: "raw", rawValue: chunk.rawValue });
+++              return;
+++            }
+++            if (options.includeRawChunks) {
+++              controller.enqueue({ type: "raw", rawValue: chunk.rawValue });
+++            }
++             controller.enqueue({ type: "error", error: chunk.error });
++             return;
++           }
+++          if (options.includeRawChunks || clewdr) {
+++            controller.enqueue({ type: "raw", rawValue: chunk.rawValue });
+++          }
++           const value = chunk.value;
++           switch (value.type) {
++             case "ping": {
++@@ -4292,6 +4327,7 @@ var AnthropicMessagesLanguageModel = class {
++             case "content_block_start": {
++               const part = value.content_block;
++               const contentBlockType = part.type;
+++              if (clewdr && contentBlockType.includes("tool")) return;
++               blockType = contentBlockType;
++               switch (contentBlockType) {
++                 case "text": {
++@@ -4878,7 +4914,7 @@ var AnthropicMessagesLanguageModel = class {
++                 finishReason = {
++                   unified: mapAnthropicStopReason({
++                     finishReason: value.message.stop_reason,
++-                    isJsonResponseFromTool
+++                    isJsonResponseFromTool: clewdr || isJsonResponseFromTool
++                   }),
++                   raw: value.message.stop_reason
++                 };
++@@ -4891,7 +4927,7 @@ var AnthropicMessagesLanguageModel = class {
++               if (value.message.content != null) {
++                 for (let contentIndex = 0; contentIndex < value.message.content.length; contentIndex++) {
++                   const part = value.message.content[contentIndex];
++-                  if (part.type === "tool_use") {
+++                  if (!clewdr && part.type === "tool_use") {
++                     const caller = part.caller;
++                     const callerInfo = caller ? {
++                       type: caller.type,
++@@ -4948,7 +4984,7 @@ var AnthropicMessagesLanguageModel = class {
++               finishReason = {
++                 unified: mapAnthropicStopReason({
++                   finishReason: value.delta.stop_reason,
++-                  isJsonResponseFromTool
+++                  isJsonResponseFromTool: clewdr || isJsonResponseFromTool
++                 }),
++                 raw: (_k = value.delta.stop_reason) != null ? _k : void 0
++               };
++diff --git a/dist/index.mjs b/dist/index.mjs
++index 650b2834d33133a0adab8170679227c62ad3fa8a..4e270a2656b2e5e398ee6910b9267dd512882cb5 100644
++--- a/dist/index.mjs
+++++ b/dist/index.mjs
++@@ -2225,7 +2225,8 @@ async function convertToAnthropicMessagesPrompt({
++   sendReasoning,
++   warnings,
++   cacheControlValidator,
++-  toolNameMapping
+++  toolNameMapping,
+++  clewdr = false
++ }) {
++   var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n, _o, _p, _q, _r, _s, _t, _u;
++   const betas = /* @__PURE__ */ new Set();
++@@ -2363,8 +2364,22 @@ async function convertToAnthropicMessagesPrompt({
++                         cache_control: cacheControl
++                       });
++                     } else {
++-                      throw new UnsupportedFunctionalityError2({
++-                        functionality: `media type: ${part.mediaType}`
+++                      if (!clewdr) {
+++                        throw new UnsupportedFunctionalityError2({
+++                          functionality: `media type: ${part.mediaType}`
+++                        });
+++                      }
+++                      const metadata = await getDocumentMetadata(part.providerOptions);
+++                      anthropicContent.push({
+++                        type: "document",
+++                        source: {
+++                          type: "base64",
+++                          media_type: part.mediaType,
+++                          data: convertToBase64(part.data)
+++                        },
+++                        title: metadata.title || part.filename || "file",
+++                        ...metadata.context && { context: metadata.context },
+++                        cache_control: cacheControl
++                       });
++                     }
++                     break;
++@@ -3279,6 +3294,16 @@ function createCitationSource(citation, citationDocuments, generateId3) {
++     }
++   };
++ }
+++function isRecord(value) {
+++  return typeof value === "object" && value !== null && !Array.isArray(value);
+++}
+++function isClewdrExtensionEvent(value) {
+++  if (!isRecord(value)) return false;
+++  if (value.type === "conversation_ready") return true;
+++  if (value.type === "message_limit") return isRecord(value.message_limit);
+++  if (value.type !== "content_block_delta" || !isRecord(value.delta)) return false;
+++  return value.delta.type === "tool_use_block_update_delta" || value.delta.type === "thinking_cut_off_delta";
+++}
++ var AnthropicMessagesLanguageModel = class {
++   constructor(modelId, config) {
++     this.specificationVersion = "v3";
++@@ -3444,12 +3469,14 @@ var AnthropicMessagesLanguageModel = class {
++         "anthropic.advisor_20260301": "advisor"
++       }
++     });
+++    const clewdr = this.config.provider === "clewdr";
++     const { prompt: messagesPrompt, betas } = await convertToAnthropicMessagesPrompt({
++       prompt,
++       sendReasoning: (_d = anthropicOptions == null ? void 0 : anthropicOptions.sendReasoning) != null ? _d : true,
++       warnings,
++       cacheControlValidator,
++-      toolNameMapping
+++      toolNameMapping,
+++      clewdr
++     });
++     const thinkingType = (_e = anthropicOptions == null ? void 0 : anthropicOptions.thinking) == null ? void 0 : _e.type;
++     const isThinking = thinkingType === "enabled" || thinkingType === "adaptive";
++@@ -4319,6 +4346,7 @@ var AnthropicMessagesLanguageModel = class {
++     let isJsonResponseFromTool = false;
++     let blockType = void 0;
++     const generateId3 = this.generateId;
+++    const clewdr = this.config.provider === "clewdr";
++     const transformedStream = response.pipeThrough(
++       new TransformStream({
++         start(controller) {
++@@ -4326,13 +4354,20 @@ var AnthropicMessagesLanguageModel = class {
++         },
++         transform(chunk, controller) {
++           var _a2, _b2, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n;
++-          if (options.includeRawChunks) {
++-            controller.enqueue({ type: "raw", rawValue: chunk.rawValue });
++-          }
++           if (!chunk.success) {
+++            if (clewdr && isClewdrExtensionEvent(chunk.rawValue)) {
+++              controller.enqueue({ type: "raw", rawValue: chunk.rawValue });
+++              return;
+++            }
+++            if (options.includeRawChunks) {
+++              controller.enqueue({ type: "raw", rawValue: chunk.rawValue });
+++            }
++             controller.enqueue({ type: "error", error: chunk.error });
++             return;
++           }
+++          if (options.includeRawChunks || clewdr) {
+++            controller.enqueue({ type: "raw", rawValue: chunk.rawValue });
+++          }
++           const value = chunk.value;
++           switch (value.type) {
++             case "ping": {
++@@ -4341,6 +4376,7 @@ var AnthropicMessagesLanguageModel = class {
++             case "content_block_start": {
++               const part = value.content_block;
++               const contentBlockType = part.type;
+++              if (clewdr && contentBlockType.includes("tool")) return;
++               blockType = contentBlockType;
++               switch (contentBlockType) {
++                 case "text": {
++@@ -4927,7 +4963,7 @@ var AnthropicMessagesLanguageModel = class {
++                 finishReason = {
++                   unified: mapAnthropicStopReason({
++                     finishReason: value.message.stop_reason,
++-                    isJsonResponseFromTool
+++                    isJsonResponseFromTool: clewdr || isJsonResponseFromTool
++                   }),
++                   raw: value.message.stop_reason
++                 };
++@@ -4940,7 +4976,7 @@ var AnthropicMessagesLanguageModel = class {
++               if (value.message.content != null) {
++                 for (let contentIndex = 0; contentIndex < value.message.content.length; contentIndex++) {
++                   const part = value.message.content[contentIndex];
++-                  if (part.type === "tool_use") {
+++                  if (!clewdr && part.type === "tool_use") {
++                     const caller = part.caller;
++                     const callerInfo = caller ? {
++                       type: caller.type,
++@@ -4997,7 +5033,7 @@ var AnthropicMessagesLanguageModel = class {
++               finishReason = {
++                 unified: mapAnthropicStopReason({
++                   finishReason: value.delta.stop_reason,
++-                  isJsonResponseFromTool
+++                  isJsonResponseFromTool: clewdr || isJsonResponseFromTool
++                 }),
++                 raw: (_k = value.delta.stop_reason) != null ? _k : void 0
++               };
++diff --git a/src/anthropic-messages-language-model.ts b/src/anthropic-messages-language-model.ts
++index dcba67c70611969e82fbc7643351465164bd84a1..8974cc4569644a71aaf50477039dc6e9ee64ec47 100644
++--- a/src/anthropic-messages-language-model.ts
+++++ b/src/anthropic-messages-language-model.ts
++@@ -141,6 +141,21 @@ type AnthropicMessagesConfig = {
++   supportsStrictTools?: boolean;
++ };
++ 
+++function isRecord(value: unknown): value is Record<string, unknown> {
+++  return typeof value === 'object' && value !== null && !Array.isArray(value);
+++}
+++
+++function isClewdrExtensionEvent(value: unknown): boolean {
+++  if (!isRecord(value)) return false;
+++  if (value.type === 'conversation_ready') return true;
+++  if (value.type === 'message_limit') return isRecord(value.message_limit);
+++  if (value.type !== 'content_block_delta' || !isRecord(value.delta)) return false;
+++  return (
+++    value.delta.type === 'tool_use_block_update_delta' ||
+++    value.delta.type === 'thinking_cut_off_delta'
+++  );
+++}
+++
++ export class AnthropicMessagesLanguageModel implements LanguageModelV3 {
++   readonly specificationVersion = 'v3';
++ 
++@@ -361,6 +376,7 @@ export class AnthropicMessagesLanguageModel implements LanguageModelV3 {
++         'anthropic.advisor_20260301': 'advisor',
++       },
++     });
+++    const clewdr = this.config.provider === 'clewdr';
++ 
++     const { prompt: messagesPrompt, betas } =
++       await convertToAnthropicMessagesPrompt({
++@@ -369,6 +385,7 @@ export class AnthropicMessagesLanguageModel implements LanguageModelV3 {
++         warnings,
++         cacheControlValidator,
++         toolNameMapping,
+++        clewdr,
++       });
++ 
++     const thinkingType = anthropicOptions?.thinking?.type;
++@@ -1467,6 +1484,7 @@ export class AnthropicMessagesLanguageModel implements LanguageModelV3 {
++       | undefined = undefined;
++ 
++     const generateId = this.generateId;
+++    const clewdr = this.config.provider === 'clewdr';
++ 
++     const transformedStream = response.pipeThrough(
++       new TransformStream<
++@@ -1478,15 +1496,22 @@ export class AnthropicMessagesLanguageModel implements LanguageModelV3 {
++         },
++ 
++         transform(chunk, controller) {
++-          if (options.includeRawChunks) {
++-            controller.enqueue({ type: 'raw', rawValue: chunk.rawValue });
++-          }
++-
++           if (!chunk.success) {
+++            if (clewdr && isClewdrExtensionEvent(chunk.rawValue)) {
+++              controller.enqueue({ type: 'raw', rawValue: chunk.rawValue });
+++              return;
+++            }
+++            if (options.includeRawChunks) {
+++              controller.enqueue({ type: 'raw', rawValue: chunk.rawValue });
+++            }
++             controller.enqueue({ type: 'error', error: chunk.error });
++             return;
++           }
++ 
+++          if (options.includeRawChunks || clewdr) {
+++            controller.enqueue({ type: 'raw', rawValue: chunk.rawValue });
+++          }
+++
++           const value = chunk.value;
++ 
++           switch (value.type) {
++@@ -1497,6 +1522,7 @@ export class AnthropicMessagesLanguageModel implements LanguageModelV3 {
++             case 'content_block_start': {
++               const part = value.content_block;
++               const contentBlockType = part.type;
+++              if (clewdr && contentBlockType.includes('tool')) return;
++               blockType = contentBlockType;
++ 
++               switch (contentBlockType) {
++@@ -2239,7 +2265,7 @@ export class AnthropicMessagesLanguageModel implements LanguageModelV3 {
++                 finishReason = {
++                   unified: mapAnthropicStopReason({
++                     finishReason: value.message.stop_reason,
++-                    isJsonResponseFromTool,
+++                    isJsonResponseFromTool: clewdr || isJsonResponseFromTool,
++                   }),
++                   raw: value.message.stop_reason,
++                 };
++@@ -2260,7 +2286,7 @@ export class AnthropicMessagesLanguageModel implements LanguageModelV3 {
++                   contentIndex++
++                 ) {
++                   const part = value.message.content[contentIndex];
++-                  if (part.type === 'tool_use') {
+++                  if (!clewdr && part.type === 'tool_use') {
++                     const caller = part.caller;
++                     const callerInfo = caller
++                       ? {
++@@ -2334,7 +2360,7 @@ export class AnthropicMessagesLanguageModel implements LanguageModelV3 {
++               finishReason = {
++                 unified: mapAnthropicStopReason({
++                   finishReason: value.delta.stop_reason,
++-                  isJsonResponseFromTool,
+++                  isJsonResponseFromTool: clewdr || isJsonResponseFromTool,
++                 }),
++                 raw: value.delta.stop_reason ?? undefined,
++               };
++diff --git a/src/convert-to-anthropic-messages-prompt.ts b/src/convert-to-anthropic-messages-prompt.ts
++index fdd6a05f909581d410bd63b5c0f14952055a2d89..36bed7b2f8ec4d0360ed8f578a4e8104df0c81f4 100644
++--- a/src/convert-to-anthropic-messages-prompt.ts
+++++ b/src/convert-to-anthropic-messages-prompt.ts
++@@ -106,12 +106,14 @@ export async function convertToAnthropicMessagesPrompt({
++   warnings,
++   cacheControlValidator,
++   toolNameMapping,
+++  clewdr = false,
++ }: {
++   prompt: LanguageModelV3Prompt;
++   sendReasoning: boolean;
++   warnings: SharedV3Warning[];
++   cacheControlValidator?: CacheControlValidator;
++   toolNameMapping: ToolNameMapping;
+++  clewdr?: boolean;
++ }): Promise<{
++   prompt: AnthropicMessagesPrompt;
++   betas: Set<string>;
++@@ -292,8 +294,24 @@ export async function convertToAnthropicMessagesPrompt({
++                         cache_control: cacheControl,
++                       });
++                     } else {
++-                      throw new UnsupportedFunctionalityError({
++-                        functionality: `media type: ${part.mediaType}`,
+++                      if (!clewdr) {
+++                        throw new UnsupportedFunctionalityError({
+++                          functionality: `media type: ${part.mediaType}`,
+++                        });
+++                      }
+++                      const metadata = await getDocumentMetadata(
+++                        part.providerOptions,
+++                      );
+++                      anthropicContent.push({
+++                        type: 'document',
+++                        source: {
+++                          type: 'base64',
+++                          media_type: part.mediaType,
+++                          data: convertToBase64(part.data),
+++                        },
+++                        title: metadata.title ?? part.filename ?? 'file',
+++                        ...(metadata.context && { context: metadata.context }),
+++                        cache_control: cacheControl,
++                       });
++                     }
++ 
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index 213e2c7..d49905e 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -8,6 +8,7 @@ overrides:
+   react-native-svg: 15.15.4
+ 
+ patchedDependencies:
++  '@ai-sdk/anthropic@3.0.79': 0b27444eb78b138a54bde22955ab6669c5c6fa0d438b5d4cf1740255bf6a4ea3
+   '@magrinj/expo-quick-look@0.3.1': 2b97fda8470c046179cf3e97282b6984fd1b926d2f54df9056a5cc455f073f2f
+   metro-runtime@0.84.4: 7f83ec93fe717bebba70d6301eac128b36bbb0b46d5db476fb5c43bac9daea6a
+   metro@0.84.4: bc3c69aec12bccf391b5180caffd62a4043c81bcf5848949a4b50e79184be6f7
+@@ -20,7 +21,7 @@ importers:
+     dependencies:
+       '@ai-sdk/anthropic':
+         specifier: ^3.0.79
+-        version: 3.0.79(zod@4.4.3)
++        version: 3.0.79(patch_hash=0b27444eb78b138a54bde22955ab6669c5c6fa0d438b5d4cf1740255bf6a4ea3)(zod@4.4.3)
+       '@ai-sdk/cerebras':
+         specifier: ^2.0.54
+         version: 2.0.54(zod@4.4.3)
+@@ -342,7 +343,7 @@ importers:
+     dependencies:
+       '@ai-sdk/anthropic':
+         specifier: ^3.0.71
+-        version: 3.0.79(zod@4.4.3)
++        version: 3.0.79(patch_hash=0b27444eb78b138a54bde22955ab6669c5c6fa0d438b5d4cf1740255bf6a4ea3)(zod@4.4.3)
+       '@ai-sdk/azure':
+         specifier: ^3.0.54
+         version: 3.0.66(zod@4.4.3)
+@@ -403,7 +404,7 @@ importers:
+     dependencies:
+       '@ai-sdk/anthropic':
+         specifier: ^3.0.71
+-        version: 3.0.79(zod@4.4.3)
++        version: 3.0.79(patch_hash=0b27444eb78b138a54bde22955ab6669c5c6fa0d438b5d4cf1740255bf6a4ea3)(zod@4.4.3)
+       '@ai-sdk/google':
+         specifier: ^3.0.64
+         version: 3.0.79(zod@4.4.3)
+@@ -8015,7 +8016,7 @@ snapshots:
+ 
+   '@adobe/css-tools@4.5.0': {}
+ 
+-  '@ai-sdk/anthropic@3.0.79(zod@4.4.3)':
++  '@ai-sdk/anthropic@3.0.79(patch_hash=0b27444eb78b138a54bde22955ab6669c5c6fa0d438b5d4cf1740255bf6a4ea3)(zod@4.4.3)':
+     dependencies:
+       '@ai-sdk/provider': 3.0.10
+       '@ai-sdk/provider-utils': 4.0.27(zod@4.4.3)
+diff --git a/pnpm-workspace.yaml b/pnpm-workspace.yaml
+index e952856..34015ed 100644
+--- a/pnpm-workspace.yaml
++++ b/pnpm-workspace.yaml
+@@ -18,6 +18,7 @@ patchedDependencies:
+   metro-runtime@0.84.4: patches/metro-runtime@0.84.4.patch
+   uniwind@1.6.5: patches/uniwind@1.6.5.patch
+   react-native-reanimated@4.5.0: patches/react-native-reanimated@4.5.0.patch
++  '@ai-sdk/anthropic@3.0.79': patches/@ai-sdk__anthropic@3.0.79.patch
+ 
+ minimumReleaseAgeExclude:
+   - '@expo/cli@57.0.3'
+diff --git a/src/ai/AiService.ts b/src/ai/AiService.ts
+index d2a2ccb..969d104 100644
+--- a/src/ai/AiService.ts
++++ b/src/ai/AiService.ts
+@@ -28,6 +28,11 @@ import { createWebSearchTool, WEB_SEARCH_TOOL_NAME } from './createWebSearchTool
+ import { resolveMediaCapabilities } from './messages/messageCapabilities';
+ import { resolveUIMessageFileUrls } from './messages/messageConverter';
+ import { providerToAiSdkConfig } from './provider/config';
++import {
++  type ClewdrProviderSettings,
++  normalizeClewdrEndpoint,
++} from './provider/custom/clewdrProvider';
++import { getClewdrInstallationId } from './provider/custom/clewdrInstallation';
+ import { listModels as listProviderModels } from './provider/listModels';
+ import { Agent } from './runtime/aiSdk/Agent';
+ import { createAnthropicCachePlugin } from './runtime/aiSdk/plugins/anthropicCache';
+@@ -332,6 +337,16 @@ export class AiService {
+         request.apiKeyOverride ?? this.services.provider.getRotatedApiKey(providerId),
+       getAuthConfig: (providerId) => this.services.provider.getAuthConfig(providerId),
+     });
++    const isClewdr = sdkConfig.providerId === 'clewdr';
++    if (isClewdr && request.chatId) {
++      const settings = sdkConfig.providerSettings as ClewdrProviderSettings;
++      if (!settings.baseURL) {
++        throw new Error('Clewdr session preparation requires a configured endpoint');
++      }
++      settings.clientId = await getClewdrInstallationId();
++      settings.normalizedEndpoint = normalizeClewdrEndpoint(settings.baseURL);
++      settings.sessionId = request.chatId;
++    }
+     const externalWebSearchProviderId =
+       buildOptions.shouldIncludeExternalTools && assistant?.settings.enableWebSearch
+         ? await this.services.preference.get('chat.web_search.default_search_keywords_provider')
+@@ -340,22 +355,24 @@ export class AiService {
+     const hasConfiguredExternalWebSearch = Boolean(
+       externalWebSearchProviderId && isFunctionCallingModel(model) && !shouldForceNativeWebSearch,
+     );
+-    const capabilities = assistant
+-      ? resolveCapabilities(
+-          model,
+-          provider,
+-          assistant,
+-          sdkConfig.providerId,
+-          this.services.preference,
+-          {
+-            webSearchProviderId: hasConfiguredExternalWebSearch
+-              ? (externalWebSearchProviderId ?? undefined)
+-              : undefined,
+-          },
+-        )
+-      : undefined;
++    const capabilities =
++      assistant && !isClewdr
++        ? resolveCapabilities(
++            model,
++            provider,
++            assistant,
++            sdkConfig.providerId,
++            this.services.preference,
++            {
++              webSearchProviderId: hasConfiguredExternalWebSearch
++                ? (externalWebSearchProviderId ?? undefined)
++                : undefined,
++            },
++          )
++        : undefined;
+     const shouldUseExternalWebSearch = Boolean(
+-      buildOptions.shouldIncludeExternalTools &&
++      !isClewdr &&
++        buildOptions.shouldIncludeExternalTools &&
+         assistant?.settings.enableWebSearch &&
+         isFunctionCallingModel(model) &&
+         (hasConfiguredExternalWebSearch || !capabilities?.webSearchPluginConfig),
+diff --git a/src/ai/__tests__/AiService.test.ts b/src/ai/__tests__/AiService.test.ts
+index f8ff84c..4431eda 100644
+--- a/src/ai/__tests__/AiService.test.ts
++++ b/src/ai/__tests__/AiService.test.ts
+@@ -26,6 +26,10 @@ jest.mock('@/integration/cherryAi', () => ({
+   generateSignature: jest.fn(() => ({})),
+ }));
+ 
++jest.mock('@/ai/provider/custom/clewdrInstallation', () => ({
++  getClewdrInstallationId: jest.fn(async () => 'clewdr-installation-1'),
++}));
++
+ jest.mock('@/ai/runtime/aiSdk/Agent', () => ({
+   Agent: jest.fn().mockImplementation((params) => {
+     mockAgentConstructor(params);
+@@ -412,6 +416,68 @@ describe('AiService web search plugin wiring', () => {
+       }),
+     );
+   });
++
++  it('injects the topic session and installation ID without constructing tools for Clewdr', async () => {
++    const provider = createProvider({
++      defaultChatEndpoint: ENDPOINT_TYPE.ANTHROPIC_MESSAGES,
++      endpointConfigs: {
++        [ENDPOINT_TYPE.ANTHROPIC_MESSAGES]: {
++          adapterFamily: 'clewdr',
++          baseUrl: 'https://clewdr.example/v1',
++        },
++      },
++      id: 'clewdr',
++      name: 'ClewdR',
++      presetProviderId: 'clewdr',
++    });
++    const model = createModel('claude-sonnet-4-6', {
++      capabilities: [MODEL_CAPABILITY.FUNCTION_CALL, MODEL_CAPABILITY.WEB_SEARCH],
++      endpointTypes: [ENDPOINT_TYPE.ANTHROPIC_MESSAGES],
++      providerId: 'clewdr',
++    });
++    const assistant = createAssistant(model.id);
++    assistant.settings.enableWebSearch = true;
++    const services = createServices({
++      assistant,
++      model,
++      provider,
++      webSearchProviderId: 'tavily',
++    });
++    const service = new AiService(services);
++
++    await service.streamText({
++      assistantId: assistant.id,
++      chatId: 'topic-1',
++      messages: [],
++      requestOptions: { signal: new AbortController().signal },
++      trigger: 'submit-message',
++    });
++
++    const params = mockAgentConstructor.mock.calls.at(-1)?.[0];
++    expect(params).toMatchObject({
++      providerId: 'clewdr',
++      providerSettings: {
++        baseURL: 'https://clewdr.example/v1',
++        normalizedEndpoint: 'https://clewdr.example/v1',
++        sessionId: 'topic-1',
++      },
++      tools: undefined,
++    });
++    expect(params.providerSettings.clientId).toBe('clewdr-installation-1');
++    expect(params.plugins).not.toEqual(
++      expect.arrayContaining([expect.objectContaining({ name: 'webSearch' })]),
++    );
++
++    await service.generateText({ assistantId: assistant.id, prompt: 'auxiliary request' });
++
++    const auxiliaryParams = mockAgentConstructor.mock.calls.at(-1)?.[0];
++    expect(auxiliaryParams.providerSettings).toMatchObject({
++      apiKey: expect.any(String),
++      baseURL: 'https://clewdr.example/v1',
++    });
++    expect(auxiliaryParams.providerSettings).not.toHaveProperty('clientId');
++    expect(auxiliaryParams.providerSettings).not.toHaveProperty('sessionId');
++  });
+ });
+ 
+ function createServices({
+@@ -448,9 +514,10 @@ function createServices({
+       getById: jest.fn(async (id: UniqueModelId) => modelsById.get(id)),
+     },
+     preference: {
+-      get: jest.fn(async (key: string) =>
+-        key === 'chat.default_model_id' ? (defaultModelId ?? null) : webSearchProviderId,
+-      ),
++      get: jest.fn(async (key: string) => {
++        if (key === 'chat.default_model_id') return defaultModelId ?? null;
++        return webSearchProviderId;
++      }),
+       getMultipleRawCached: jest.fn(() => webSearchPreferences),
+     },
+     provider: {
+diff --git a/src/ai/provider/__tests__/clewdrRegistry.test.ts b/src/ai/provider/__tests__/clewdrRegistry.test.ts
+new file mode 100644
+index 0000000..c5e643e
+--- /dev/null
++++ b/src/ai/provider/__tests__/clewdrRegistry.test.ts
+@@ -0,0 +1,84 @@
++import { extensionRegistry } from '@cherrystudio/ai-core/provider';
++import { MobileRegistryLoader } from '@cherrystudio/provider-registry/mobile';
++import { ENDPOINT_TYPE } from '@cherrystudio/provider-registry';
++import { createUniqueModelId, type Model } from '@/data/types/model';
++import type { Provider } from '@/data/types/provider';
++
++import { providerToAiSdkConfig } from '../config';
++import '../factory';
++
++describe('Clewdr provider registry', () => {
++  it('publishes a Clewdr Anthropic endpoint with the isolated adapter family', () => {
++    const provider = new MobileRegistryLoader().findProvider('clewdr');
++
++    expect(provider).toMatchObject({
++      defaultChatEndpoint: ENDPOINT_TYPE.ANTHROPIC_MESSAGES,
++      endpointConfigs: {
++        [ENDPOINT_TYPE.ANTHROPIC_MESSAGES]: {
++          adapterFamily: 'clewdr',
++          baseUrl: 'http://127.0.0.1:8484/v1',
++        },
++      },
++      id: 'clewdr',
++      name: 'ClewdR',
++    });
++  });
++
++  it('routes the Clewdr endpoint to the Clewdr provider extension', async () => {
++    const provider: Provider = {
++      apiFeatures: {
++        arrayContent: true,
++        developerRole: true,
++        serviceTier: true,
++        streamOptions: true,
++        verbosity: false,
++      },
++      apiKeys: [],
++      authType: 'api-key',
++      defaultChatEndpoint: ENDPOINT_TYPE.ANTHROPIC_MESSAGES,
++      endpointConfigs: {
++        [ENDPOINT_TYPE.ANTHROPIC_MESSAGES]: {
++          adapterFamily: 'clewdr',
++          baseUrl: 'http://127.0.0.1:8484/v1',
++        },
++      },
++      id: 'clewdr',
++      isEnabled: true,
++      name: 'ClewdR',
++      presetProviderId: 'clewdr',
++      settings: {},
++    };
++    const model: Model = {
++      capabilities: [],
++      endpointTypes: [ENDPOINT_TYPE.ANTHROPIC_MESSAGES],
++      id: createUniqueModelId('clewdr', 'claude-sonnet-4-6'),
++      isDeprecated: false,
++      isEnabled: true,
++      isHidden: false,
++      modelId: 'claude-sonnet-4-6',
++      name: 'Claude Sonnet 4.6',
++      providerId: 'clewdr',
++      supportsStreaming: true,
++    };
++
++    const config = await providerToAiSdkConfig(provider, model, {
++      getAuthConfig: jest.fn(async () => null),
++      getRotatedApiKey: jest.fn(async () => 'secret'),
++    });
++
++    expect(config).toMatchObject({
++      providerId: 'clewdr',
++      providerSettings: {
++        apiKey: 'secret',
++        baseURL: 'http://127.0.0.1:8484/v1',
++      },
++    });
++
++    expect(extensionRegistry.has('clewdr')).toBe(true);
++    const sdkProvider = await extensionRegistry.createProvider('clewdr', config.providerSettings);
++    expect(sdkProvider.languageModel('claude-sonnet-4-6')).toMatchObject({
++      modelId: 'claude-sonnet-4-6',
++      specificationVersion: 'v3',
++    });
++  });
++});
+diff --git a/src/ai/provider/config.ts b/src/ai/provider/config.ts
+index d5a0a42..8f0022c 100644
+--- a/src/ai/provider/config.ts
++++ b/src/ai/provider/config.ts
+@@ -9,8 +9,12 @@ import { ENDPOINT_TYPE } from '@cherrystudio/provider-registry';
+ import type { EndpointType, Model } from '@/data/types/model';
+ import type { AuthConfig, Provider } from '@/data/types/provider';
+ import { generateSignature } from '@/integration/cherryAi';
+-import type { ProviderConfig } from '../types';
+-import { type AppProviderId, type AppProviderSettingsMap, appProviderIds } from '../types';
++import {
++  type AppProviderId,
++  type AppProviderSettingsMap,
++  appProviderIds,
++  type ProviderConfig,
++} from '../types';
+ import {
+   defaultAppHeaders,
+   formatApiHost,
+@@ -123,6 +127,7 @@ export async function providerToAiSdkConfig(
+     { match: (_, id) => id === 'newapi', build: buildRoutedGatewayConfig },
+     { match: (_, id) => id === 'aihubmix', build: buildGenericProviderConfig },
+     { match: (_, id) => id === 'gateway', build: buildGenericProviderConfig },
++    { match: (_, id) => id === 'clewdr', build: buildGenericProviderConfig },
+   ];
+ 
+   const builder = builders.find((b) => b.match(provider, aiSdkProviderId));
+diff --git a/src/ai/provider/custom/__tests__/clewdrAnthropicCompatibility.test.ts b/src/ai/provider/custom/__tests__/clewdrAnthropicCompatibility.test.ts
+new file mode 100644
+index 0000000..d6065bd
+--- /dev/null
++++ b/src/ai/provider/custom/__tests__/clewdrAnthropicCompatibility.test.ts
+@@ -0,0 +1,230 @@
++import { createAnthropic } from '@ai-sdk/anthropic';
++import type { LanguageModelV3CallOptions, LanguageModelV3StreamPart } from '@ai-sdk/provider';
++import { streamText } from 'ai';
++
++import { createClewdrProvider } from '../clewdrProvider';
++
++const filePrompt: LanguageModelV3CallOptions = {
++  prompt: [
++    {
++      role: 'user',
++      content: [
++        {
++          data: new Uint8Array([0x50, 0x4b, 0x03, 0x04]),
++          filename: 'project.zip',
++          mediaType: 'application/zip',
++          type: 'file',
++        },
++      ],
++    },
++  ],
++};
++
++const textPrompt: LanguageModelV3CallOptions = {
++  prompt: [{ role: 'user', content: [{ text: 'hello', type: 'text' }] }],
++};
++
++async function captureRequest(
++  run: (fetch: typeof globalThis.fetch) => PromiseLike<unknown>,
++): Promise<Record<string, unknown>> {
++  let body: Record<string, unknown> | undefined;
++  const fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
++    body = JSON.parse(String(init?.body));
++    return new Response('{}', { status: 200 });
++  }) as typeof globalThis.fetch;
++  try {
++    await run(fetch);
++  } catch (error) {
++    if (!body) throw error;
++  }
++  if (!body) throw new Error('no request was captured');
++  return body;
++}
++
++async function collectClewdrChunks(event: unknown) {
++  return collectClewdrStream(`data: ${JSON.stringify(event)}\n\n`);
++}
++
++function createEventStreamResponse(body: string): Response {
++  const encoded = new TextEncoder().encode(body);
++  return {
++    body: new ReadableStream<Uint8Array>({
++      start(controller) {
++        controller.enqueue(encoded);
++        controller.close();
++      },
++    }),
++    headers: new Headers({ 'content-type': 'text/event-stream' }),
++    ok: true,
++    status: 200,
++    statusText: 'OK',
++  } as Response;
++}
++
++async function collectClewdrStream(body: string) {
++  const fetch = (async () => createEventStreamResponse(body)) as typeof globalThis.fetch;
++  const result = await createClewdrProvider({ apiKey: 'test', fetch })
++    .languageModel('claude-sonnet-4-6')
++    .doStream(textPrompt);
++  const chunks: LanguageModelV3StreamPart[] = [];
++  for await (const chunk of result.stream) chunks.push(chunk);
++  return chunks;
++}
++
++describe('Clewdr Anthropic SDK boundary', () => {
++  it('serializes arbitrary Clewdr files as base64 documents', async () => {
++    const body = await captureRequest((fetch) =>
++      createClewdrProvider({ apiKey: 'test', baseURL: 'http://127.0.0.1:8484/v1', fetch })
++        .languageModel('claude-sonnet-4-6')
++        .doStream(filePrompt),
++    );
++
++    expect(body).toMatchObject({
++      messages: [
++        {
++          content: [
++            {
++              source: { data: 'UEsDBA==', media_type: 'application/zip', type: 'base64' },
++              title: 'project.zip',
++              type: 'document',
++            },
++          ],
++        },
++      ],
++    });
++  });
++
++  it('keeps arbitrary MIME rejection for official Anthropic', async () => {
++    await expect(
++      captureRequest((fetch) =>
++        createAnthropic({ apiKey: 'test', fetch })
++          .languageModel('claude-sonnet-4-6')
++          .doStream(filePrompt),
++      ),
++    ).rejects.toThrow('media type: application/zip');
++  });
++
++  it.each([
++    { type: 'conversation_ready' },
++    { message_limit: { type: 'within_limit' }, type: 'message_limit' },
++    {
++      delta: { cut_off: true, type: 'thinking_cut_off_delta' },
++      index: 0,
++      type: 'content_block_delta',
++    },
++    {
++      delta: {
++        display_content: { text: 'View the file', type: 'text' },
++        message: 'View the file',
++        type: 'tool_use_block_update_delta',
++      },
++      index: 2,
++      type: 'content_block_delta',
++    },
++  ])('passes Clewdr-specific event through as one raw chunk', async (event) => {
++    const chunks = await collectClewdrChunks(event);
++    expect(chunks.filter((chunk) => chunk.type === 'raw')).toEqual([
++      { rawValue: event, type: 'raw' },
++    ]);
++  });
++
++  it('keeps Clewdr event rejection for official Anthropic', async () => {
++    const event = { type: 'conversation_ready' };
++    const fetch = (async () =>
++      createEventStreamResponse(`data: ${JSON.stringify(event)}\n\n`)) as typeof globalThis.fetch;
++
++    await expect(
++      createAnthropic({ apiKey: 'test', fetch })
++        .languageModel('claude-sonnet-4-6')
++        .doStream(textPrompt),
++    ).rejects.toThrow('No matching discriminator');
++  });
++
++  it('reports malformed standard events instead of treating them as Clewdr extensions', async () => {
++    await expect(collectClewdrChunks({ message: {}, type: 'message_start' })).rejects.toThrow(
++      'Type validation failed',
++    );
++  });
++
++  it('continues through the AI SDK streamText chain after a Clewdr extension event', async () => {
++    const events = [
++      { type: 'conversation_ready' },
++      {
++        message: {
++          content: [],
++          id: 'msg-1',
++          model: 'claude-sonnet-4-6',
++          role: 'assistant',
++          usage: { input_tokens: 1 },
++        },
++        type: 'message_start',
++      },
++      { content_block: { text: '', type: 'text' }, index: 0, type: 'content_block_start' },
++      { delta: { text: 'answer', type: 'text_delta' }, index: 0, type: 'content_block_delta' },
++      { index: 0, type: 'content_block_stop' },
++      {
++        delta: { stop_reason: 'end_turn', stop_sequence: null },
++        type: 'message_delta',
++        usage: { output_tokens: 1 },
++      },
++      { type: 'message_stop' },
++    ];
++    const fetch = (async () =>
++      createEventStreamResponse(
++        events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(''),
++      )) as typeof globalThis.fetch;
++    const result = streamText({
++      maxRetries: 0,
++      model: createClewdrProvider({ apiKey: 'test', fetch }).languageModel('claude-sonnet-4-6'),
++      prompt: 'hello',
++    });
++
++    await expect(result.text).resolves.toBe('answer');
++  });
++
++  it('keeps remote tool activity as raw chunks without emitting tool calls', async () => {
++    const events = [
++      {
++        message: {
++          content: [],
++          id: 'msg-1',
++          model: 'claude-sonnet-4-6',
++          role: 'assistant',
++          usage: { input_tokens: 1 },
++        },
++        type: 'message_start',
++      },
++      {
++        content_block: { id: 'toolu-1', input: {}, name: 'view', type: 'tool_use' },
++        index: 0,
++        type: 'content_block_start',
++      },
++      {
++        delta: { partial_json: '{"path":"a.txt"}', type: 'input_json_delta' },
++        index: 0,
++        type: 'content_block_delta',
++      },
++      { index: 0, type: 'content_block_stop' },
++      {
++        delta: { stop_reason: 'tool_use', stop_sequence: null },
++        type: 'message_delta',
++        usage: { output_tokens: 1 },
++      },
++      { type: 'message_stop' },
++    ];
++    const chunks = await collectClewdrStream(
++      events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(''),
++    );
++
++    expect(chunks.filter((chunk) => chunk.type === 'raw').map((chunk) => chunk.rawValue)).toEqual(
++      events,
++    );
++    expect(chunks.filter((chunk) => chunk.type.startsWith('tool-'))).toEqual([]);
++    expect(chunks).toContainEqual(
++      expect.objectContaining({
++        finishReason: { raw: 'tool_use', unified: 'stop' },
++        type: 'finish',
++      }),
++    );
++  });
++});
+diff --git a/src/ai/provider/custom/__tests__/clewdrInstallation.test.ts b/src/ai/provider/custom/__tests__/clewdrInstallation.test.ts
+new file mode 100644
+index 0000000..828825a
+--- /dev/null
++++ b/src/ai/provider/custom/__tests__/clewdrInstallation.test.ts
+@@ -0,0 +1,81 @@
++const state: { exists: boolean; text: string; writes: string[] } = {
++  exists: false,
++  text: '',
++  writes: [],
++};
++
++const generatedInstallationId = '00000000-0000-4000-8000-000000000001';
++
++jest.mock('expo-crypto', () => ({ randomUUID: jest.fn(() => generatedInstallationId) }));
++
++jest.mock('expo-file-system', () => {
++  class MockFile {
++    get exists() {
++      return state.exists;
++    }
++
++    async text() {
++      return state.text;
++    }
++
++    write(value: string) {
++      state.exists = true;
++      state.text = value;
++      state.writes.push(value);
++    }
++  }
++
++  return {
++    File: MockFile,
++    Paths: { document: 'file:///documents' },
++  };
++});
++
++describe('Clewdr installation identity', () => {
++  beforeEach(() => {
++    state.exists = false;
++    state.text = '';
++    state.writes = [];
++  });
++
++  it('creates one ID in the Clewdr namespace and reuses it concurrently', async () => {
++    let getClewdrInstallationId!: () => Promise<string>;
++    jest.isolateModules(() => {
++      ({ getClewdrInstallationId } = jest.requireActual('../clewdrInstallation'));
++    });
++
++    const [first, second] = await Promise.all([
++      getClewdrInstallationId(),
++      getClewdrInstallationId(),
++    ]);
++
++    expect(first).toBe(generatedInstallationId);
++    expect(second).toBe(first);
++    expect(state.writes).toEqual([generatedInstallationId]);
++  });
++
++  it('loads a persisted Clewdr installation ID without replacing it', async () => {
++    const persistedInstallationId = '00000000-0000-4000-8000-000000000002';
++    state.exists = true;
++    state.text = `${persistedInstallationId}\n`;
++    let getClewdrInstallationId!: () => Promise<string>;
++    jest.isolateModules(() => {
++      ({ getClewdrInstallationId } = jest.requireActual('../clewdrInstallation'));
++    });
++
++    await expect(getClewdrInstallationId()).resolves.toBe(persistedInstallationId);
++    expect(state.writes).toEqual([]);
++  });
++
++  it('replaces an invalid persisted value with a UUID', async () => {
++    state.exists = true;
++    state.text = 'uuid()';
++    let getClewdrInstallationId!: () => Promise<string>;
++    jest.isolateModules(() => {
++      ({ getClewdrInstallationId } = jest.requireActual('../clewdrInstallation'));
++    });
++
++    await expect(getClewdrInstallationId()).resolves.toBe(generatedInstallationId);
++    expect(state.writes).toEqual([generatedInstallationId]);
++  });
++});
+diff --git a/src/ai/provider/custom/__tests__/clewdrProvider.test.ts b/src/ai/provider/custom/__tests__/clewdrProvider.test.ts
+new file mode 100644
+index 0000000..66f5832
+--- /dev/null
++++ b/src/ai/provider/custom/__tests__/clewdrProvider.test.ts
+@@ -0,0 +1,338 @@
++import { Hex, SHA256 } from 'crypto-es';
++
++import {
++  createClewdrFetch,
++  createClewdrProvider,
++  normalizeClewdrEndpoint,
++} from '../clewdrProvider';
++
++const clientId = 'client-123';
++const topicId = 'topic-456';
++const normalizedEndpoint = 'https://clewdr.example/api/v1';
++const wireSessionId = `cherry_topic_v1_${SHA256(
++  `clewdr-cherry-session-v1\0${clientId}\0${normalizedEndpoint}\0${topicId}`,
++).toString(Hex)}`;
++const messagesUrl = `${normalizedEndpoint}/messages`;
++
++function makeBody(filename = 'folder/project.zip', mediaType = 'application/zip') {
++  const source = { type: 'base64', media_type: mediaType, data: 'UEsDBA==' };
++  return {
++    messages: [
++      { role: 'user', content: [{ type: 'document', source, title: filename }] },
++      { role: 'assistant', content: [{ type: 'text', text: '{"literal":true}' }] },
++      {
++        role: 'user',
++        content: [{ type: 'document', source: { ...source }, title: filename }],
++      },
++    ],
++    metadata: { trace_id: 'trace-1', user_id: 'replace-me' },
++    model: 'claude-sonnet-4-6',
++    system: 'Keep this exact system prompt',
++    tool_choice: { type: 'auto' },
++    tools: [{ name: 'view', input_schema: { type: 'object' } }],
++  };
++}
++
++function okStream() {
++  return new Response('data: {"type":"message_stop"}\n\n', {
++    headers: { 'content-type': 'text/event-stream' },
++    status: 200,
++  });
++}
++
++function makeFetch(fetch: typeof globalThis.fetch) {
++  return createClewdrFetch({
++    apiKey: 'secret-key',
++    clientId,
++    fetch,
++    normalizedEndpoint,
++    sessionId: topicId,
++  });
++}
++
++describe('Clewdr request boundary', () => {
++  it('normalizes the endpoint used by the session digest', () => {
++    expect(normalizeClewdrEndpoint('HTTPS://CLEWDR.EXAMPLE:443/api/v1/?ignored=yes#fragment')).toBe(
++      normalizedEndpoint,
++    );
++    expect(normalizeClewdrEndpoint('http://localhost:8484/v1///')).toBe('http://localhost:8484/v1');
++  });
++
++  it('uploads repeated base64 sources once and preserves the complete message history', async () => {
++    const calls: { init?: RequestInit; url: string }[] = [];
++    const upstream = jest.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
++      const url = String(input);
++      calls.push({ init, url });
++      if (url.endsWith('/files')) {
++        return new Response(
++          JSON.stringify({
++            filename: 'project.zip',
++            id: 'file_clewdr_v1_abc',
++            mime_type: 'application/zip',
++            size_bytes: 4,
++            type: 'file',
++          }),
++          { headers: { 'content-type': 'application/json' }, status: 200 },
++        );
++      }
++      return okStream();
++    }) as typeof globalThis.fetch;
++    const signal = new AbortController().signal;
++
++    await makeFetch(upstream)(messagesUrl, {
++      body: JSON.stringify(makeBody()),
++      headers: {
++        'content-length': '999',
++        'content-type': 'application/json',
++        'x-api-key': 'secret-key',
++        'x-trace': 'keep-me',
++      },
++      method: 'POST',
++      signal,
++    });
++
++    expect(calls.map((call) => call.url)).toEqual([`${normalizedEndpoint}/files`, messagesUrl]);
++    expect(calls[0].init?.body).toBeInstanceOf(FormData);
++    const uploadHeaders = new Headers(calls[0].init?.headers);
++    expect(uploadHeaders.get('x-api-key')).toBe('secret-key');
++    expect(uploadHeaders.get('x-trace')).toBe('keep-me');
++    expect(uploadHeaders.has('content-type')).toBe(false);
++    expect(uploadHeaders.has('content-length')).toBe(false);
++    expect(calls[0].init?.signal).toBe(signal);
++
++    const sent = JSON.parse(String(calls[1].init?.body));
++    expect(sent).toEqual({
++      messages: [
++        {
++          role: 'user',
++          content: [
++            {
++              type: 'document',
++              source: { file_id: 'file_clewdr_v1_abc', type: 'file' },
++              title: 'folder/project.zip',
++            },
++          ],
++        },
++        { role: 'assistant', content: [{ type: 'text', text: '{"literal":true}' }] },
++        {
++          role: 'user',
++          content: [
++            {
++              type: 'document',
++              source: { file_id: 'file_clewdr_v1_abc', type: 'file' },
++              title: 'folder/project.zip',
++            },
++          ],
++        },
++      ],
++      metadata: { trace_id: 'trace-1', user_id: wireSessionId },
++      model: 'claude-sonnet-4-6',
++      system: 'Keep this exact system prompt',
++    });
++    expect(String(calls[1].init?.body)).not.toContain('UEsDBA==');
++    expect(calls[1].init?.signal).toBe(signal);
++    expect(new Headers(calls[1].init?.headers).has('content-length')).toBe(false);
++  });
++
++  it('deduplicates concurrent uploads and isolates cache entries by session, filename, and MIME', async () => {
++    let uploads = 0;
++    let releaseUpload: (() => void) | undefined;
++    const blocked = new Promise<void>((resolve) => {
++      releaseUpload = resolve;
++    });
++    const upstream = jest.fn(async (input: RequestInfo | URL) => {
++      if (String(input).endsWith('/files')) {
++        uploads += 1;
++        await blocked;
++        return new Response(
++          JSON.stringify({
++            filename: 'project.zip',
++            id: `file-${uploads}`,
++            mime_type: 'application/zip',
++            size_bytes: 4,
++            type: 'file',
++          }),
++          { status: 200 },
++        );
++      }
++      return okStream();
++    }) as typeof globalThis.fetch;
++    const fetch = makeFetch(upstream);
++    const secondProviderFetch = makeFetch(upstream);
++
++    const first = fetch(messagesUrl, { body: JSON.stringify(makeBody()), method: 'POST' });
++    const concurrent = secondProviderFetch(messagesUrl, {
++      body: JSON.stringify(makeBody()),
++      method: 'POST',
++    });
++    releaseUpload?.();
++    await Promise.all([first, concurrent]);
++    await fetch(messagesUrl, { body: JSON.stringify(makeBody()), method: 'POST' });
++    expect(uploads).toBe(1);
++
++    await fetch(messagesUrl, {
++      body: JSON.stringify(makeBody('renamed.zip')),
++      method: 'POST',
++    });
++    await fetch(messagesUrl, {
++      body: JSON.stringify(makeBody('project.zip', 'application/octet-stream')),
++      method: 'POST',
++    });
++    const otherSession = createClewdrFetch({
++      apiKey: 'secret-key',
++      clientId,
++      fetch: upstream,
++      normalizedEndpoint,
++      sessionId: 'another-topic',
++    });
++    await otherSession(messagesUrl, { body: JSON.stringify(makeBody()), method: 'POST' });
++    expect(uploads).toBe(4);
++  });
++
++  it('passes non-message requests through without rewriting them', async () => {
++    const upstream = jest.fn(async () => new Response('{}', { status: 200 }));
++    const body = JSON.stringify(makeBody());
++
++    await makeFetch(upstream)(`${normalizedEndpoint}/models`, { body, method: 'POST' });
++
++    expect(upstream).toHaveBeenCalledWith(`${normalizedEndpoint}/models`, {
++      body,
++      method: 'POST',
++    });
++  });
++
++  it('merges Request and Headers instances without dropping authentication headers', async () => {
++    const calls: { init?: RequestInit; url: string }[] = [];
++    const upstream = jest.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
++      calls.push({ init, url: input instanceof Request ? input.url : String(input) });
++      return okStream();
++    }) as typeof globalThis.fetch;
++    const request = new Request(messagesUrl, {
++      headers: new Headers({ 'x-api-key': 'request-key', 'x-request': 'keep-request' }),
++      method: 'POST',
++    });
++
++    await makeFetch(upstream)(request, {
++      body: JSON.stringify({ messages: [], model: 'claude-sonnet-4-6' }),
++      headers: new Headers({ 'x-api-key': 'init-key', 'x-init': 'keep-init' }),
++    });
++
++    const headers = new Headers(calls[0].init?.headers);
++    expect(headers.get('x-api-key')).toBe('init-key');
++    expect(headers.get('x-request')).toBe('keep-request');
++    expect(headers.get('x-init')).toBe('keep-init');
++  });
++
++  it('rejects invalid upload responses', async () => {
++    const upstream = jest.fn(async (input: RequestInfo | URL) =>
++      String(input).endsWith('/files') ? new Response('{"id":42}', { status: 200 }) : okStream(),
++    ) as typeof globalThis.fetch;
++
++    await expect(
++      makeFetch(upstream)(messagesUrl, {
++        body: JSON.stringify(makeBody()),
++        method: 'POST',
++      }),
++    ).rejects.toThrow('invalid response');
++  });
++
++  it('propagates 409 and resets then retries a 410 once without re-uploading', async () => {
++    const conflict = jest.fn(
++      async () =>
++        new Response(
++          JSON.stringify({
++            error: { message: 'mismatch', type: 'conversation_reuse_failed' },
++            type: 'error',
++          }),
++          { status: 409 },
++        ),
++    ) as typeof globalThis.fetch;
++    const conflictResponse = await makeFetch(conflict)(messagesUrl, {
++      body: JSON.stringify({ messages: [], model: 'claude-sonnet-4-6' }),
++      method: 'POST',
++    });
++    expect(conflictResponse.status).toBe(409);
++    expect(conflict).toHaveBeenCalledTimes(1);
++
++    const calls: { body: string; url: string }[] = [];
++    let messageCalls = 0;
++    const expired = jest.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
++      const url = String(input);
++      calls.push({ body: String(init?.body), url });
++      if (url.endsWith('/files')) {
++        return new Response(
++          JSON.stringify({
++            filename: 'project.zip',
++            id: 'file_clewdr_v1_expired',
++            mime_type: 'application/zip',
++            size_bytes: 4,
++            type: 'file',
++          }),
++          { status: 200 },
++        );
++      }
++      if (url.endsWith('/sessions/reset')) return new Response('{}', { status: 200 });
++      messageCalls += 1;
++      return new Response(
++        JSON.stringify({
++          error: {
++            code: 'conversation_expired',
++            message: 'expired',
++            type: 'invalid_request_error',
++          },
++          type: 'error',
++        }),
++        { status: 410 },
++      );
++    }) as typeof globalThis.fetch;
++
++    const response = await makeFetch(expired)(messagesUrl, {
++      body: JSON.stringify(makeBody()),
++      method: 'POST',
++    });
++
++    expect(response.status).toBe(410);
++    expect(messageCalls).toBe(2);
++    expect(calls.map((call) => call.url)).toEqual([
++      `${normalizedEndpoint}/files`,
++      messagesUrl,
++      `${normalizedEndpoint}/sessions/reset`,
++      messagesUrl,
++    ]);
++    expect(JSON.parse(calls[2].body)).toEqual({ session_id: wireSessionId });
++    expect(calls[1].body).not.toContain('UEsDBA==');
++    expect(calls[3].body).toBe(calls[1].body);
++  });
++
++  it('propagates non-session 410 responses without resetting the session', async () => {
++    const upstream = jest.fn(
++      async () =>
++        new Response(
++          JSON.stringify({
++            error: { code: 'file_expired', message: 'expired file', type: 'invalid_request_error' },
++            type: 'error',
++          }),
++          { status: 410 },
++        ),
++    ) as typeof globalThis.fetch;
++
++    const response = await makeFetch(upstream)(messagesUrl, {
++      body: JSON.stringify({ messages: [], model: 'claude-sonnet-4-6' }),
++      method: 'POST',
++    });
++
++    expect(response.status).toBe(410);
++    expect(upstream).toHaveBeenCalledTimes(1);
++    await expect(response.json()).resolves.toMatchObject({ error: { code: 'file_expired' } });
++  });
++
++  it('requires an installation client ID when session preparation is enabled', () => {
++    expect(() =>
++      createClewdrProvider({
++        apiKey: 'secret-key',
++        baseURL: normalizedEndpoint,
++        sessionId: topicId,
++      }),
++    ).toThrow('installation client ID');
++  });
++});
+diff --git a/src/ai/provider/custom/clewdrInstallation.ts b/src/ai/provider/custom/clewdrInstallation.ts
+new file mode 100644
+index 0000000..6079be7
+--- /dev/null
++++ b/src/ai/provider/custom/clewdrInstallation.ts
+@@ -0,0 +1,31 @@
++import * as Crypto from 'expo-crypto';
++import { File, Paths } from 'expo-file-system';
++
++const installationFile = new File(Paths.document, 'clewdr.installation_client_id');
++const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
++
++let installationIdPromise: Promise<string> | undefined;
++
++export async function getClewdrInstallationId(): Promise<string> {
++  if (installationIdPromise) return installationIdPromise;
++
++  const pending = loadOrCreateInstallationId();
++  installationIdPromise = pending;
++  try {
++    return await pending;
++  } catch (error) {
++    if (installationIdPromise === pending) installationIdPromise = undefined;
++    throw error;
++  }
++}
++
++async function loadOrCreateInstallationId(): Promise<string> {
++  if (installationFile.exists) {
++    const existing = (await installationFile.text()).trim();
++    if (UUID_PATTERN.test(existing)) return existing;
++  }
++
++  const generated = Crypto.randomUUID();
++  installationFile.write(generated);
++  return generated;
++}
+diff --git a/src/ai/provider/custom/clewdrProvider.ts b/src/ai/provider/custom/clewdrProvider.ts
+new file mode 100644
+index 0000000..97f4f39
+--- /dev/null
++++ b/src/ai/provider/custom/clewdrProvider.ts
+@@ -0,0 +1,306 @@
++import {
++  type AnthropicProvider,
++  type AnthropicProviderSettings,
++  createAnthropic,
++} from '@ai-sdk/anthropic';
++import { Base64, Hex, SHA256 } from 'crypto-es';
++
++import { getOrCreateClewdrUpload } from './clewdrUploadCache';
++
++const CLEWDR_SESSION_PREFIX = 'cherry_topic_v1_';
++const CLEWDR_SESSION_DOMAIN = 'clewdr-cherry-session-v1';
++
++const fetchIdentities = new WeakMap<typeof globalThis.fetch, number>();
++let nextFetchIdentity = 1;
++
++export interface ClewdrProviderSettings extends AnthropicProviderSettings {
++  clientId?: string;
++  normalizedEndpoint?: string;
++  sessionId?: string;
++}
++
++interface ClewdrFetchSettings {
++  apiKey?: string;
++  clientId: string;
++  fetch: typeof globalThis.fetch;
++  normalizedEndpoint: string;
++  sessionId: string;
++}
++
++interface RewriteContext {
++  endpoint: string;
++  fetch: typeof globalThis.fetch;
++  fetchIdentity: number;
++  headers: Headers;
++  principalDigest: string;
++  signal: AbortSignal | null | undefined;
++  wireSessionId: string;
++}
++
++interface StagedFileResponse {
++  filename: string;
++  id: string;
++  mime_type: string;
++  size_bytes: number;
++  type: 'file';
++}
++
++type JsonObject = Record<string, unknown>;
++
++export function normalizeClewdrEndpoint(endpoint: string): string {
++  const url = new URL(endpoint);
++  url.hash = '';
++  url.search = '';
++  url.pathname = url.pathname.replace(/\/+$/, '');
++  return url.toString().replace(/\/$/, '');
++}
++
++export function createClewdrProvider(options: ClewdrProviderSettings = {}): AnthropicProvider {
++  const {
++    clientId,
++    fetch: customFetch,
++    normalizedEndpoint,
++    sessionId,
++    ...anthropicOptions
++  } = options;
++  let providerFetch = customFetch;
++
++  if (sessionId !== undefined) {
++    if (!clientId) {
++      throw new Error('Clewdr session preparation requires an installation client ID');
++    }
++    if (!sessionId) throw new Error('Clewdr session preparation requires a topic ID');
++    const endpoint = normalizeClewdrEndpoint(normalizedEndpoint ?? anthropicOptions.baseURL ?? '');
++    providerFetch = createClewdrFetch({
++      ...anthropicOptions,
++      clientId,
++      fetch: customFetch ?? globalThis.fetch,
++      normalizedEndpoint: endpoint,
++      sessionId,
++    });
++  }
++
++  return createAnthropic({ ...anthropicOptions, fetch: providerFetch, name: 'clewdr' });
++}
++
++export function createClewdrFetch(settings: ClewdrFetchSettings): typeof globalThis.fetch {
++  const endpoint = normalizeClewdrEndpoint(settings.normalizedEndpoint);
++  const wireSessionId = createSessionId(settings.clientId, endpoint, settings.sessionId);
++  const principalDigest = sha256Text(settings.apiKey ?? '');
++  const fetchIdentity = getFetchIdentity(settings.fetch);
++
++  return async (input, init) => {
++    if (!isMessagesRequest(input) || typeof init?.body !== 'string') {
++      return settings.fetch(input, init);
++    }
++
++    const parsed: unknown = JSON.parse(init.body);
++    if (!isJsonObject(parsed)) return settings.fetch(input, init);
++
++    const messageHeaders = mergeHeaders(input, init.headers);
++    await rewriteFileSources(parsed, {
++      endpoint,
++      fetch: settings.fetch,
++      fetchIdentity,
++      headers: messageHeaders,
++      principalDigest,
++      signal: init.signal,
++      wireSessionId,
++    });
++    parsed.metadata = {
++      ...(isJsonObject(parsed.metadata) ? parsed.metadata : {}),
++      user_id: wireSessionId,
++    };
++    delete parsed.tools;
++    delete parsed.tool_choice;
++
++    messageHeaders.delete('content-length');
++    const rewrittenInit: RequestInit = {
++      ...init,
++      body: JSON.stringify(parsed),
++      headers: messageHeaders,
++    };
++    const response = await settings.fetch(input, rewrittenInit);
++    if (response.status !== 410 || !(await isConversationExpired(response))) return response;
++    if (response.body) await response.body.cancel().catch(() => undefined);
++
++    const resetHeaders = new Headers(messageHeaders);
++    resetHeaders.delete('content-length');
++    resetHeaders.set('content-type', 'application/json');
++    const resetResponse = await settings.fetch(`${endpoint}/sessions/reset`, {
++      body: JSON.stringify({ session_id: wireSessionId }),
++      headers: resetHeaders,
++      method: 'POST',
++      signal: init.signal,
++    });
++    if (!resetResponse.ok) return resetResponse;
++    return settings.fetch(input, rewrittenInit);
++  };
++}
++
++async function isConversationExpired(response: Response): Promise<boolean> {
++  try {
++    const payload: unknown = await response.clone().json();
++    return (
++      isJsonObject(payload) &&
++      isJsonObject(payload.error) &&
++      payload.error.code === 'conversation_expired'
++    );
++  } catch {
++    return false;
++  }
++}
++
++async function rewriteFileSources(body: JsonObject, context: RewriteContext): Promise<void> {
++  if (!Array.isArray(body.messages)) return;
++  const rewrites: Promise<void>[] = [];
++
++  for (const message of body.messages) {
++    if (!isJsonObject(message) || !Array.isArray(message.content)) continue;
++    for (const part of message.content) {
++      if (!isJsonObject(part) || !isJsonObject(part.source)) continue;
++      const source = part.source;
++      if (
++        source.type !== 'base64' ||
++        typeof source.data !== 'string' ||
++        typeof source.media_type !== 'string'
++      ) {
++        continue;
++      }
++
++      const sourceFilename = typeof source.file_name === 'string' ? source.file_name : undefined;
++      const filename = normalizeFilename(
++        typeof part.title === 'string' ? part.title : (sourceFilename ?? 'file'),
++      );
++      rewrites.push(
++        stageFile(source.data, filename, source.media_type, context).then((fileId) => {
++          part.source = { file_id: fileId, type: 'file' };
++        }),
++      );
++    }
++  }
++
++  await Promise.all(rewrites);
++}
++
++function stageFile(
++  data: string,
++  filename: string,
++  mediaType: string,
++  context: RewriteContext,
++): Promise<string> {
++  const cacheKey = JSON.stringify([
++    context.fetchIdentity,
++    context.endpoint,
++    context.principalDigest,
++    context.wireSessionId,
++    sha256Base64(data),
++    filename,
++    mediaType,
++  ]);
++  return getOrCreateClewdrUpload(cacheKey, () => uploadFile(data, filename, mediaType, context));
++}
++
++async function uploadFile(
++  data: string,
++  filename: string,
++  mediaType: string,
++  context: RewriteContext,
++): Promise<string> {
++  const form = new FormData();
++  const bytes = decodeBase64(data);
++  const blobBytes = new Uint8Array(bytes.byteLength);
++  blobBytes.set(bytes);
++  form.append('file', new Blob([blobBytes.buffer], { type: mediaType }), filename);
++
++  const headers = new Headers(context.headers);
++  headers.delete('content-length');
++  headers.delete('content-type');
++  const response = await context.fetch(`${context.endpoint}/files`, {
++    body: form,
++    headers,
++    method: 'POST',
++    signal: context.signal,
++  });
++  if (!response.ok) {
++    const detail = await response.text();
++    throw new Error(`Clewdr file upload failed with HTTP ${response.status}: ${detail}`);
++  }
++
++  const payload: unknown = await response.json();
++  if (!isStagedFileResponse(payload)) {
++    throw new Error('Clewdr file upload returned an invalid response');
++  }
++  return payload.id;
++}
++
++function createSessionId(clientId: string, endpoint: string, topicId: string): string {
++  return `${CLEWDR_SESSION_PREFIX}${sha256Text(
++    `${CLEWDR_SESSION_DOMAIN}\0${clientId}\0${endpoint}\0${topicId}`,
++  )}`;
++}
++
++function decodeBase64(value: string): Uint8Array {
++  const binary = atob(value);
++  const bytes = new Uint8Array(binary.length);
++  for (let index = 0; index < binary.length; index += 1) {
++    bytes[index] = binary.charCodeAt(index);
++  }
++  return bytes;
++}
++
++function normalizeFilename(filename: string): string {
++  const basename = filename.replaceAll('\\', '/').split('/').filter(Boolean).at(-1) ?? 'file';
++  const printable = [...basename].filter((character) => {
++    const codePoint = character.codePointAt(0) ?? 0;
++    return codePoint > 0x1f && codePoint !== 0x7f;
++  });
++  return printable.join('').trim() || 'file';
++}
++
++function mergeHeaders(input: RequestInfo | URL, headers: HeadersInit | undefined): Headers {
++  const merged = input instanceof Request ? new Headers(input.headers) : new Headers();
++  new Headers(headers).forEach((value, key) => merged.set(key, value));
++  return merged;
++}
++
++function getFetchIdentity(fetch: typeof globalThis.fetch): number {
++  const existing = fetchIdentities.get(fetch);
++  if (existing !== undefined) return existing;
++  const identity = nextFetchIdentity;
++  nextFetchIdentity += 1;
++  fetchIdentities.set(fetch, identity);
++  return identity;
++}
++
++function isMessagesRequest(input: RequestInfo | URL): boolean {
++  const url = input instanceof Request ? input.url : String(input);
++  try {
++    return new URL(url).pathname.replace(/\/+$/, '').endsWith('/messages');
++  } catch {
++    return false;
++  }
++}
++
++function isJsonObject(value: unknown): value is JsonObject {
++  return typeof value === 'object' && value !== null && !Array.isArray(value);
++}
++
++function isStagedFileResponse(value: unknown): value is StagedFileResponse {
++  return (
++    isJsonObject(value) &&
++    typeof value.filename === 'string' &&
++    typeof value.id === 'string' &&
++    typeof value.mime_type === 'string' &&
++    typeof value.size_bytes === 'number' &&
++    value.type === 'file'
++  );
++}
++
++function sha256Text(value: string): string {
++  return SHA256(value).toString(Hex);
++}
++
++function sha256Base64(value: string): string {
++  return SHA256(Base64.parse(value)).toString(Hex);
++}
+diff --git a/src/ai/provider/custom/clewdrUploadCache.ts b/src/ai/provider/custom/clewdrUploadCache.ts
+new file mode 100644
+index 0000000..1746488
+--- /dev/null
++++ b/src/ai/provider/custom/clewdrUploadCache.ts
+@@ -0,0 +1,45 @@
++const MAX_UPLOAD_CACHE_ENTRIES = 1024;
++
++interface UploadCacheEntry {
++  promise: Promise<string>;
++  settled: boolean;
++}
++
++const uploadCache = new Map<string, UploadCacheEntry>();
++
++export function getOrCreateClewdrUpload(
++  key: string,
++  upload: () => Promise<string>,
++): Promise<string> {
++  const cached = uploadCache.get(key);
++  if (cached) {
++    uploadCache.delete(key);
++    uploadCache.set(key, cached);
++    return cached.promise;
++  }
++
++  reserveEntry();
++  const entry: UploadCacheEntry = {
++    promise: Promise.resolve(''),
++    settled: false,
++  };
++  entry.promise = upload().then(
++    (fileId) => {
++      entry.settled = true;
++      return fileId;
++    },
++    (error: unknown) => {
++      if (uploadCache.get(key) === entry) uploadCache.delete(key);
++      throw error;
++    },
++  );
++  uploadCache.set(key, entry);
++  return entry.promise;
++}
++
++function reserveEntry(): void {
++  if (uploadCache.size < MAX_UPLOAD_CACHE_ENTRIES) return;
++  const settled = uploadCache.entries().find(([, entry]) => entry.settled);
++  if (!settled) throw new Error('Clewdr file upload cache is busy');
++  uploadCache.delete(settled[0]);
++}
+diff --git a/src/ai/provider/extensions/index.ts b/src/ai/provider/extensions/index.ts
+index 2f8d12b..165cf75 100644
+--- a/src/ai/provider/extensions/index.ts
++++ b/src/ai/provider/extensions/index.ts
+@@ -1,6 +1,7 @@
+ /** App-specific Provider Extensions registered alongside `coreExtensions`. */
+ 
+ import { type CerebrasProviderSettings, createCerebras } from '@ai-sdk/cerebras';
++import type { AnthropicProvider } from '@ai-sdk/anthropic';
+ import { createGateway, type GatewayProviderSettings } from '@ai-sdk/gateway';
+ import { createGroq, type GroqProviderSettings } from '@ai-sdk/groq';
+ import { createHuggingFace, type HuggingFaceProviderSettings } from '@ai-sdk/huggingface';
+@@ -11,6 +12,7 @@ import { createTogetherAI, type TogetherAIProviderSettings } from '@ai-sdk/toget
+ import { ProviderExtension, type ProviderExtensionConfig } from '@cherrystudio/ai-core/provider';
+ 
+ import { type AihubmixProviderSettings, createAihubmix } from '../custom/aihubmixProvider';
++import { type ClewdrProviderSettings, createClewdrProvider } from '../custom/clewdrProvider';
+ import { createNewApi, type NewApiProviderSettings } from '../custom/newapiProvider';
+ 
+ export const PerplexityExtension = ProviderExtension.create({
+@@ -55,6 +57,12 @@ export const GroqExtension = ProviderExtension.create({
+   create: createGroq,
+ } as const satisfies ProviderExtensionConfig<GroqProviderSettings, ProviderV3, 'groq'>);
+ 
++export const ClewdrExtension = ProviderExtension.create({
++  name: 'clewdr',
++  supportsImageGeneration: false,
++  create: createClewdrProvider,
++} as const satisfies ProviderExtensionConfig<ClewdrProviderSettings, AnthropicProvider, 'clewdr'>);
++
+ export const AiHubMixExtension = ProviderExtension.create({
+   name: 'aihubmix',
+   supportsImageGeneration: true,
+@@ -81,6 +89,7 @@ export const extensions = [
+   HuggingFaceExtension,
+   GatewayExtension,
+   CerebrasExtension,
++  ClewdrExtension,
+   AiHubMixExtension,
+   NewApiExtension,
+   TogetherAIExtension,

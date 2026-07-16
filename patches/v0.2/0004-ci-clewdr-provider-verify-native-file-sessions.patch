@@ -1,0 +1,1225 @@
+From f3ac4152e02e5b66ef0b03ad89f743ba40d7dbba Mon Sep 17 00:00:00 2001
+From: GottenHeave <274621501+GottenHeave@users.noreply.github.com>
+Date: Thu, 16 Jul 2026 18:05:33 +0000
+Subject: [PATCH 4/5] ci(clewdr-provider): verify native file sessions
+
+Signed-off-by: GottenHeave <274621501+GottenHeave@users.noreply.github.com>
+---
+ app.config.test.ts                            |  41 +++
+ app.config.ts                                 |  60 ++++
+ scripts/ci/clewdr-runtime-smoke.sh            | 148 ++++++++++
+ scripts/ci/clewdr_runtime_fixture.py          | 275 ++++++++++++++++++
+ scripts/ci/test_clewdr_runtime_fixture.py     | 272 +++++++++++++++++
+ .../custom/__tests__/clewdrProvider.test.ts   |  14 +-
+ src/ai/provider/custom/clewdrProvider.ts      |   4 +-
+ .../__tests__/clewdrRuntimeSmoke.test.ts      |  42 +++
+ src/ai/runtime/clewdrRuntimeSmoke.ts          | 114 ++++++++
+ src/app/_layout.tsx                           |  37 +--
+ .../ClewdrRuntimeSmokeGate.tsx                |  45 +++
+ .../__tests__/ClewdrRuntimeSmokeGate.test.ts  |  12 +
+ src/components/clewdrRuntimeSmoke/index.ts    |   1 +
+ 13 files changed, 1042 insertions(+), 23 deletions(-)
+ create mode 100644 app.config.test.ts
+ create mode 100644 app.config.ts
+ create mode 100755 scripts/ci/clewdr-runtime-smoke.sh
+ create mode 100755 scripts/ci/clewdr_runtime_fixture.py
+ create mode 100755 scripts/ci/test_clewdr_runtime_fixture.py
+ create mode 100644 src/ai/runtime/__tests__/clewdrRuntimeSmoke.test.ts
+ create mode 100644 src/ai/runtime/clewdrRuntimeSmoke.ts
+ create mode 100644 src/components/clewdrRuntimeSmoke/ClewdrRuntimeSmokeGate.tsx
+ create mode 100644 src/components/clewdrRuntimeSmoke/__tests__/ClewdrRuntimeSmokeGate.test.ts
+ create mode 100644 src/components/clewdrRuntimeSmoke/index.ts
+
+diff --git a/app.config.test.ts b/app.config.test.ts
+new file mode 100644
+index 0000000..7ee6e45
+--- /dev/null
++++ b/app.config.test.ts
+@@ -0,0 +1,41 @@
++import type { ExpoConfig } from 'expo/config';
++
++import { createExpoConfig } from './app.config';
++
++const baseConfig: ExpoConfig = {
++  ios: { infoPlist: { ExistingKey: true } },
++  name: 'Cherry Studio',
++  plugins: [['expo-build-properties', { ios: { deploymentTarget: '17.0' } }]],
++  slug: 'cherry-studio',
++};
++
++describe('Clewdr runtime smoke Expo config', () => {
++  it('keeps local transport exceptions out of normal and non-CI builds', () => {
++    for (const environment of [
++      { ci: undefined, runtimeSmoke: undefined },
++      { ci: undefined, runtimeSmoke: '1' },
++      { ci: '1', runtimeSmoke: undefined },
++    ]) {
++      const config = createExpoConfig(baseConfig, environment);
++      expect(config.ios?.infoPlist).toEqual({ ExistingKey: true });
++      expect(config.plugins).toEqual(baseConfig.plugins);
++    }
++  });
++
++  it('enables local HTTP only for the CI smoke build', () => {
++    const config = createExpoConfig(baseConfig, { ci: '1', runtimeSmoke: '1' });
++
++    expect(config.extra?.clewdrRuntimeSmokeCi).toBe(true);
++    expect(config.ios?.infoPlist).toMatchObject({
++      ExistingKey: true,
++      NSAppTransportSecurity: { NSAllowsLocalNetworking: true },
++    });
++    expect(config.plugins).toContainEqual([
++      'expo-build-properties',
++      {
++        android: { usesCleartextTraffic: true },
++        ios: { deploymentTarget: '17.0' },
++      },
++    ]);
++  });
++});
+diff --git a/app.config.ts b/app.config.ts
+new file mode 100644
+index 0000000..8b7f27f
+--- /dev/null
++++ b/app.config.ts
+@@ -0,0 +1,60 @@
++import type { ExpoConfig } from 'expo/config';
++
++import appJson from './app.json';
++
++type ExpoPlugin = NonNullable<ExpoConfig['plugins']>[number];
++
++interface SmokeBuildEnvironment {
++  ci?: string;
++  runtimeSmoke?: string;
++}
++
++function isRecord(value: unknown): value is Record<string, unknown> {
++  return typeof value === 'object' && value !== null && !Array.isArray(value);
++}
++
++function enableAndroidCleartext(plugin: ExpoPlugin): ExpoPlugin {
++  if (!Array.isArray(plugin) || plugin[0] !== 'expo-build-properties') return plugin;
++  const options = isRecord(plugin[1]) ? plugin[1] : {};
++  const android = isRecord(options.android) ? options.android : {};
++  return [plugin[0], { ...options, android: { ...android, usesCleartextTraffic: true } }];
++}
++
++export function createExpoConfig(
++  config: ExpoConfig,
++  environment: SmokeBuildEnvironment,
++): ExpoConfig {
++  const ciEnabled = environment.ci === '1';
++  const smokeEnabled = ciEnabled && environment.runtimeSmoke === '1';
++  if (!smokeEnabled) {
++    return {
++      ...config,
++      extra: { ...config.extra, clewdrRuntimeSmokeCi: ciEnabled },
++    };
++  }
++
++  const transportSecurity = config.ios?.infoPlist?.NSAppTransportSecurity;
++  return {
++    ...config,
++    extra: { ...config.extra, clewdrRuntimeSmokeCi: true },
++    ios: {
++      ...config.ios,
++      infoPlist: {
++        ...config.ios?.infoPlist,
++        NSAppTransportSecurity: {
++          ...(isRecord(transportSecurity) ? transportSecurity : {}),
++          NSAllowsLocalNetworking: true,
++        },
++      },
++    },
++    plugins: config.plugins?.map(enableAndroidCleartext),
++  };
++}
++
++const staticConfig = appJson.expo as ExpoConfig;
++
++export default (): ExpoConfig =>
++  createExpoConfig(staticConfig, {
++    ci: process.env.CI,
++    runtimeSmoke: process.env.EXPO_PUBLIC_CLEWDR_RUNTIME_SMOKE,
++  });
+diff --git a/scripts/ci/clewdr-runtime-smoke.sh b/scripts/ci/clewdr-runtime-smoke.sh
+new file mode 100755
+index 0000000..3ab250e
+--- /dev/null
++++ b/scripts/ci/clewdr-runtime-smoke.sh
+@@ -0,0 +1,148 @@
++#!/usr/bin/env bash
++
++set -euo pipefail
++
++platform="${1:-}"
++if [[ "$platform" != "android" && "$platform" != "ios" ]]; then
++  echo "usage: $0 android|ios" >&2
++  exit 2
++fi
++
++repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
++fixture="$repo_root/scripts/ci/clewdr_runtime_fixture.py"
++tmp_dir="$(mktemp -d)"
++port_file="$tmp_dir/fixture-port"
++fixture_log="$tmp_dir/fixture.log"
++build_log="$tmp_dir/native-build.log"
++fixture_pid=""
++
++cleanup() {
++  if [[ -n "$fixture_pid" ]]; then
++    kill "$fixture_pid" 2>/dev/null || true
++    wait "$fixture_pid" 2>/dev/null || true
++  fi
++  rm -rf "$tmp_dir"
++}
++trap cleanup EXIT
++
++dump_native_logs() {
++  if [[ "$platform" == "android" ]]; then
++    adb -s "$device" logcat -d -t 500 2>/dev/null || true
++  else
++    xcrun simctl spawn "$device" log show --last 5m --style compact \
++      --predicate 'process == "Cherry Studio" OR eventMessage CONTAINS[c] "clewdr"' 2>/dev/null || true
++  fi
++}
++
++for command_name in python3 pnpm curl; do
++  if ! command -v "$command_name" >/dev/null; then
++    echo "required command not found: $command_name" >&2
++    exit 1
++  fi
++done
++
++cd "$repo_root"
++python3 -m unittest scripts/ci/test_clewdr_runtime_fixture.py
++python3 "$fixture" --port 0 --port-file "$port_file" >"$fixture_log" 2>&1 &
++fixture_pid=$!
++
++for ((attempt = 0; attempt < 50; attempt++)); do
++  [[ -s "$port_file" ]] && break
++  kill -0 "$fixture_pid" 2>/dev/null || {
++    cat "$fixture_log" >&2
++    exit 1
++  }
++  sleep 0.1
++done
++if [[ ! -s "$port_file" ]]; then
++  echo "fixture did not publish its port" >&2
++  exit 1
++fi
++port="$(cat "$port_file")"
++
++if [[ "$platform" == "android" ]]; then
++  command -v adb >/dev/null || {
++    echo "adb is required for Android runtime smoke" >&2
++    exit 1
++  }
++  if [[ -n "${ANDROID_SERIAL:-}" ]]; then
++    device="$ANDROID_SERIAL"
++  else
++    mapfile -t devices < <(adb devices | awk '$2 == "device" { print $1 }')
++    if [[ "${#devices[@]}" -ne 1 ]]; then
++      echo "expected exactly one running Android device; set ANDROID_SERIAL when multiple devices are connected" >&2
++      exit 1
++    fi
++    device="${devices[0]}"
++  fi
++  if [[ "$(adb -s "$device" get-state 2>/dev/null)" != "device" ]]; then
++    echo "Android device is not ready: $device" >&2
++    exit 1
++  fi
++  abi="$(adb -s "$device" shell getprop ro.product.cpu.abi | tr -d '\r')"
++  case "$abi" in
++    arm64-v8a | x86_64 | x86) ;;
++    *)
++      echo "unsupported Android emulator ABI: $abi" >&2
++      exit 1
++      ;;
++  esac
++  device_endpoint="http://10.0.2.2:$port"
++  EXPO_PUBLIC_CLEWDR_RUNTIME_SMOKE=1 CI=1 pnpm exec expo prebuild --platform android --no-install
++  if grep -q '^reactNativeArchitectures=' android/gradle.properties; then
++    sed -i.bak -E "s/^reactNativeArchitectures=.*/reactNativeArchitectures=$abi/" android/gradle.properties
++  else
++    printf '\nreactNativeArchitectures=%s\n' "$abi" >>android/gradle.properties
++  fi
++  rm -f android/gradle.properties.bak
++  EXPO_PUBLIC_CLEWDR_RUNTIME_SMOKE=1 CI=1 pnpm exec expo run:android \
++    --variant release --no-bundler --device "$device" 2>&1 | tee "$build_log"
++else
++  command -v xcrun >/dev/null || {
++    echo "xcrun is required for iOS runtime smoke" >&2
++    exit 1
++  }
++  device="$(xcrun simctl list devices booted --json | python3 -c '
++import json, sys
++devices = [device["udid"] for runtime in json.load(sys.stdin)["devices"].values() for device in runtime if device["state"] == "Booted"]
++if len(devices) != 1:
++    raise SystemExit("expected exactly one booted iOS Simulator")
++print(devices[0])
++')"
++  xcrun simctl getenv "$device" HOME >/dev/null
++  device_endpoint="http://localhost:$port"
++  EXPO_PUBLIC_CLEWDR_RUNTIME_SMOKE=1 CI=1 pnpm exec expo prebuild --platform ios --no-install
++  EXPO_PUBLIC_CLEWDR_RUNTIME_SMOKE=1 CI=1 pnpm exec expo run:ios \
++    --configuration Release --no-bundler --device "$device" 2>&1 | tee "$build_log"
++fi
++
++encoded_endpoint="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$device_endpoint")"
++smoke_url="cherrystudio://clewdr-runtime-smoke?endpoint=$encoded_endpoint"
++if [[ "$platform" == "android" ]]; then
++  adb -s "$device" shell am start -W -a android.intent.action.VIEW -d "$smoke_url" \
++    -p com.cherry_ai.cherry_studio_app >/dev/null
++else
++  xcrun simctl openurl "$device" "$smoke_url"
++fi
++
++for ((attempt = 0; attempt < 90; attempt++)); do
++  status_json="$(curl --fail --silent --show-error "http://127.0.0.1:$port/status")"
++  status="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["status"])' <<<"$status_json")"
++  if [[ "$status" == "success" ]]; then
++    echo "Clewdr $platform native runtime smoke passed"
++    exit 0
++  fi
++  if [[ "$status" == "failure" ]]; then
++    echo "$status_json" >&2
++    cat "$fixture_log" >&2
++    dump_native_logs
++    exit 1
++  fi
++  sleep 2
++done
++
++echo "Clewdr $platform native runtime smoke timed out" >&2
++cat "$fixture_log" >&2
++cat "$build_log" >&2
++dump_native_logs
++exit 1
+diff --git a/scripts/ci/clewdr_runtime_fixture.py b/scripts/ci/clewdr_runtime_fixture.py
+new file mode 100755
+index 0000000..eb8b014
+--- /dev/null
++++ b/scripts/ci/clewdr_runtime_fixture.py
+@@ -0,0 +1,275 @@
++#!/usr/bin/env python3
++
++from __future__ import annotations
++
++import argparse
++import json
++import threading
++from email import policy
++from email.parser import BytesParser
++from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
++from pathlib import Path
++from typing import Any
++
++EXPECTED_BYTES = b"CLEWDR"
++EXPECTED_FILENAME = "clewdr-runtime-smoke.bin"
++EXPECTED_MIME = "application/octet-stream"
++FILE_ID = "file_clewdr_v1_runtime_smoke"
++EXPECTED_ANSWER = "runtime smoke ok"
++EXPECTED_API_KEY = "ci-runtime-smoke"
++EXPECTED_MODEL = "claude-runtime-smoke"
++
++
++class FixtureState:
++    def __init__(self) -> None:
++        self.lock = threading.Lock()
++        self.upload_received = False
++        self.message_received = False
++        self.upload_count = 0
++        self.message_count = 0
++        self.result_count = 0
++        self.status = "pending"
++        self.detail = "waiting for native app"
++
++    def fail(self, detail: str) -> None:
++        with self.lock:
++            self.status = "failure"
++            self.detail = detail
++
++    def snapshot(self) -> dict[str, Any]:
++        with self.lock:
++            return {
++                "status": self.status,
++                "detail": self.detail,
++                "uploadCount": self.upload_count,
++                "messageCount": self.message_count,
++                "resultCount": self.result_count,
++            }
++
++
++class SmokeServer(ThreadingHTTPServer):
++    def __init__(self, address: tuple[str, int]) -> None:
++        super().__init__(address, FixtureHandler)
++        self.state = FixtureState()
++
++
++class FixtureHandler(BaseHTTPRequestHandler):
++    server: SmokeServer
++
++    def do_GET(self) -> None:
++        if self.path != "/status":
++            self._json_response(404, {"error": "not_found"})
++            return
++        self._json_response(200, self.server.state.snapshot())
++
++    def do_POST(self) -> None:
++        try:
++            if self.path == "/v1/files":
++                self._handle_file_upload()
++            elif self.path == "/v1/messages":
++                self._handle_messages()
++            elif self.path == "/result":
++                self._handle_result()
++            else:
++                self._json_response(404, {"error": "not_found"})
++        except (ValueError, json.JSONDecodeError) as error:
++            self.server.state.fail(str(error))
++            self._json_response(400, {"error": "invalid_smoke_request", "detail": str(error)})
++
++    def _handle_file_upload(self) -> None:
++        self._validate_api_key()
++        content_type = self.headers.get("content-type", "")
++        body = self._read_body()
++        message = BytesParser(policy=policy.default).parsebytes(
++            f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode() + body
++        )
++        if message.get_content_type() != "multipart/form-data" or not message.is_multipart():
++            raise ValueError("upload must be multipart/form-data")
++
++        parts = list(message.iter_parts())
++        if len(parts) != 1:
++            raise ValueError("upload must contain exactly one multipart field")
++        part = parts[0]
++        if part.get_param("name", header="content-disposition") != "file":
++            raise ValueError("multipart field must be named file")
++        if part.get_filename() != EXPECTED_FILENAME:
++            raise ValueError("unexpected upload filename")
++        if part.get_content_type() != EXPECTED_MIME:
++            raise ValueError("unexpected upload MIME type")
++        if part.get_payload(decode=True) != EXPECTED_BYTES:
++            raise ValueError("unexpected upload bytes")
++
++        with self.server.state.lock:
++            self.server.state.upload_received = True
++            self.server.state.upload_count += 1
++        self._json_response(
++            200,
++            {
++                "id": FILE_ID,
++                "type": "file",
++                "filename": EXPECTED_FILENAME,
++                "mime_type": EXPECTED_MIME,
++                "size_bytes": len(EXPECTED_BYTES),
++            },
++        )
++
++    def _handle_messages(self) -> None:
++        self._validate_api_key()
++        payload = json.loads(self._read_body())
++        with self.server.state.lock:
++            upload_received = self.server.state.upload_received
++        if not upload_received:
++            raise ValueError("message arrived before upload")
++        if "tools" in payload or "tool_choice" in payload:
++            raise ValueError("Clewdr request must strip tools")
++        if payload.get("model") != EXPECTED_MODEL:
++            raise ValueError("message uses an unexpected model")
++        metadata = payload.get("metadata")
++        if not isinstance(metadata, dict) or not str(metadata.get("user_id", "")).startswith(
++            "cherry_topic_v1_"
++        ):
++            raise ValueError("message is missing the explicit session ID")
++        messages = payload.get("messages")
++        if not _contains_exact_user_document(messages, FILE_ID):
++            raise ValueError("message does not contain the exact staged document source")
++        if _contains_base64_source(messages):
++            raise ValueError("message still contains a base64 source")
++
++        with self.server.state.lock:
++            self.server.state.message_received = True
++            self.server.state.message_count += 1
++        events = [
++            {"type": "conversation_ready"},
++            {
++                "type": "message_start",
++                "message": {
++                    "id": "msg_smoke",
++                    "model": "claude-runtime-smoke",
++                    "role": "assistant",
++                    "content": [],
++                    "usage": {"input_tokens": 1},
++                },
++            },
++            {
++                "type": "content_block_start",
++                "index": 0,
++                "content_block": {"type": "text", "text": ""},
++            },
++            {
++                "type": "content_block_delta",
++                "index": 0,
++                "delta": {"type": "text_delta", "text": EXPECTED_ANSWER},
++            },
++            {"type": "content_block_stop", "index": 0},
++            {
++                "type": "message_delta",
++                "delta": {"stop_reason": "end_turn", "stop_sequence": None},
++                "usage": {"output_tokens": 3},
++            },
++            {"type": "message_stop"},
++        ]
++        body = "".join(
++            f"data: {json.dumps(event, separators=(',', ':'))}\n\n" for event in events
++        ).encode()
++        self.send_response(200)
++        self.send_header("content-type", "text/event-stream")
++        self.send_header("content-length", str(len(body)))
++        self.end_headers()
++        self.wfile.write(body)
++
++    def _handle_result(self) -> None:
++        payload = json.loads(self._read_body())
++        if payload.get("status") != "success":
++            raise ValueError(f"native runner failed: {payload.get('error', 'unknown error')}")
++        if payload.get("answer") != EXPECTED_ANSWER:
++            raise ValueError("native runner returned an unexpected answer")
++        raw_types = payload.get("rawTypes")
++        if not isinstance(raw_types, list) or "conversation_ready" not in raw_types:
++            raise ValueError("native runner did not consume the Clewdr extension event")
++        with self.server.state.lock:
++            request_counts = (
++                self.server.state.upload_count,
++                self.server.state.message_count,
++                self.server.state.result_count,
++            )
++        if request_counts != (1, 1, 0):
++            raise ValueError("native runner used unexpected fixture request counts")
++        with self.server.state.lock:
++            self.server.state.result_count += 1
++            self.server.state.status = "success"
++            self.server.state.detail = "native multipart upload and stream completed"
++        self._json_response(200, {"ok": True})
++
++    def _validate_api_key(self) -> None:
++        if self.headers.get("x-api-key") != EXPECTED_API_KEY:
++            raise ValueError("request is missing the expected x-api-key")
++
++    def _read_body(self) -> bytes:
++        length = int(self.headers.get("content-length", "0"))
++        if length <= 0 or length > 1024 * 1024:
++            raise ValueError("request body length is invalid")
++        body = self.rfile.read(length)
++        if len(body) != length:
++            raise ValueError("request body ended early")
++        return body
++
++    def _json_response(self, status: int, payload: dict[str, Any]) -> None:
++        body = json.dumps(payload).encode()
++        self.send_response(status)
++        self.send_header("content-type", "application/json")
++        self.send_header("content-length", str(len(body)))
++        self.end_headers()
++        self.wfile.write(body)
++
++    def log_message(self, format_string: str, *args: object) -> None:
++        return
++
++
++def _contains_exact_user_document(value: Any, file_id: str) -> bool:
++    if not isinstance(value, list):
++        return False
++    expected_source = {"type": "file", "file_id": file_id}
++    for message in value:
++        if not isinstance(message, dict) or message.get("role") != "user":
++            continue
++        content = message.get("content")
++        if not isinstance(content, list):
++            continue
++        if any(
++            isinstance(part, dict)
++            and part.get("type") == "document"
++            and part.get("source") == expected_source
++            for part in content
++        ):
++            return True
++    return False
++
++
++def _contains_base64_source(value: Any) -> bool:
++    if isinstance(value, dict):
++        if value.get("type") == "base64":
++            return True
++        return any(_contains_base64_source(child) for child in value.values())
++    if isinstance(value, list):
++        return any(_contains_base64_source(child) for child in value)
++    return False
++
++
++def create_server(host: str, port: int) -> SmokeServer:
++    return SmokeServer((host, port))
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--host", default="0.0.0.0")
++    parser.add_argument("--port", type=int, default=0)
++    parser.add_argument("--port-file", type=Path, required=True)
++    args = parser.parse_args()
++
++    server = create_server(args.host, args.port)
++    args.port_file.write_text(str(server.server_address[1]), encoding="utf-8")
++    server.serve_forever()
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/scripts/ci/test_clewdr_runtime_fixture.py b/scripts/ci/test_clewdr_runtime_fixture.py
+new file mode 100755
+index 0000000..5e0a33c
+--- /dev/null
++++ b/scripts/ci/test_clewdr_runtime_fixture.py
+@@ -0,0 +1,272 @@
++#!/usr/bin/env python3
++
++from __future__ import annotations
++
++import http.client
++import importlib.util
++import json
++import threading
++import unittest
++from pathlib import Path
++
++FIXTURE_PATH = Path(__file__).with_name("clewdr_runtime_fixture.py")
++SPEC = importlib.util.spec_from_file_location("clewdr_runtime_fixture", FIXTURE_PATH)
++assert SPEC and SPEC.loader
++fixture = importlib.util.module_from_spec(SPEC)
++SPEC.loader.exec_module(fixture)
++
++
++class ClewdrRuntimeFixtureTest(unittest.TestCase):
++    def setUp(self) -> None:
++        self.server = fixture.create_server("127.0.0.1", 0)
++        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
++        self.thread.start()
++        self.connection = http.client.HTTPConnection(
++            "127.0.0.1", self.server.server_address[1], timeout=2
++        )
++
++    def tearDown(self) -> None:
++        self.connection.close()
++        self.server.shutdown()
++        self.server.server_close()
++        self.thread.join(timeout=2)
++
++    def test_accepts_upload_message_and_native_result(self) -> None:
++        boundary = "clewdr-smoke-boundary"
++        upload = _multipart(
++            boundary,
++            [
++                (
++                    "file",
++                    fixture.EXPECTED_FILENAME,
++                    fixture.EXPECTED_MIME,
++                    fixture.EXPECTED_BYTES,
++                )
++            ],
++        )
++        status, payload = self._request(
++            "POST",
++            "/v1/files",
++            upload,
++            {
++                "content-type": f"multipart/form-data; boundary={boundary}",
++                "x-api-key": fixture.EXPECTED_API_KEY,
++            },
++        )
++        self.assertEqual(status, 200)
++        self.assertEqual(payload["id"], fixture.FILE_ID)
++
++        message = json.dumps(
++            {
++                "messages": [
++                    {
++                        "role": "user",
++                        "content": [
++                            {
++                                "type": "document",
++                                "source": {"type": "file", "file_id": fixture.FILE_ID},
++                            }
++                        ]
++                    }
++                ],
++                "metadata": {"user_id": "cherry_topic_v1_test"},
++                "model": fixture.EXPECTED_MODEL,
++            }
++        ).encode()
++        self.connection.request(
++            "POST",
++            "/v1/messages",
++            message,
++            {"content-type": "application/json", "x-api-key": fixture.EXPECTED_API_KEY},
++        )
++        response = self.connection.getresponse()
++        stream_body = response.read().decode()
++        self.assertEqual(response.status, 200)
++        self.assertIn("conversation_ready", stream_body)
++        self.assertIn(fixture.EXPECTED_ANSWER, stream_body)
++
++        result = json.dumps(
++            {
++                "status": "success",
++                "answer": fixture.EXPECTED_ANSWER,
++                "rawTypes": ["conversation_ready"],
++            }
++        ).encode()
++        status, payload = self._request(
++            "POST", "/result", result, {"content-type": "application/json"}
++        )
++        self.assertEqual(status, 200)
++        self.assertTrue(payload["ok"])
++        status, payload = self._request("GET", "/status")
++        self.assertEqual(status, 200)
++        self.assertEqual(payload["status"], "success")
++        self.assertEqual(payload["uploadCount"], 1)
++        self.assertEqual(payload["messageCount"], 1)
++        self.assertEqual(payload["resultCount"], 1)
++
++    def test_rejects_duplicate_multipart_fields(self) -> None:
++        boundary = "clewdr-duplicate-boundary"
++        parts = [
++            ("file", fixture.EXPECTED_FILENAME, fixture.EXPECTED_MIME, fixture.EXPECTED_BYTES),
++            ("extra", "extra.bin", fixture.EXPECTED_MIME, b"extra"),
++        ]
++        status, payload = self._request(
++            "POST",
++            "/v1/files",
++            _multipart(boundary, parts),
++            {
++                "content-type": f"multipart/form-data; boundary={boundary}",
++                "x-api-key": fixture.EXPECTED_API_KEY,
++            },
++        )
++        self.assertEqual(status, 400)
++        self.assertIn("exactly one", payload["detail"])
++
++    def test_rejects_wrong_file_metadata_and_bytes(self) -> None:
++        cases = [
++            ("wrong.bin", fixture.EXPECTED_MIME, fixture.EXPECTED_BYTES, "filename"),
++            (fixture.EXPECTED_FILENAME, "text/plain", fixture.EXPECTED_BYTES, "MIME"),
++            (fixture.EXPECTED_FILENAME, fixture.EXPECTED_MIME, b"wrong", "bytes"),
++        ]
++        for index, (filename, mime_type, data, expected_detail) in enumerate(cases):
++            with self.subTest(expected_detail=expected_detail):
++                boundary = f"clewdr-invalid-{index}"
++                status, payload = self._request(
++                    "POST",
++                    "/v1/files",
++                    _multipart(boundary, [("file", filename, mime_type, data)]),
++                    {
++                        "content-type": f"multipart/form-data; boundary={boundary}",
++                        "x-api-key": fixture.EXPECTED_API_KEY,
++                    },
++                )
++                self.assertEqual(status, 400)
++                self.assertIn(expected_detail, payload["detail"])
++
++    def test_rejects_missing_api_key(self) -> None:
++        boundary = "clewdr-missing-key"
++        status, payload = self._request(
++            "POST",
++            "/v1/files",
++            _multipart(
++                boundary,
++                [
++                    (
++                        "file",
++                        fixture.EXPECTED_FILENAME,
++                        fixture.EXPECTED_MIME,
++                        fixture.EXPECTED_BYTES,
++                    )
++                ],
++            ),
++            {"content-type": f"multipart/form-data; boundary={boundary}"},
++        )
++        self.assertEqual(status, 400)
++        self.assertIn("x-api-key", payload["detail"])
++
++    def test_rejects_invalid_message_protocol(self) -> None:
++        boundary = "clewdr-message-protocol"
++        status, _ = self._request(
++            "POST",
++            "/v1/files",
++            _multipart(
++                boundary,
++                [
++                    (
++                        "file",
++                        fixture.EXPECTED_FILENAME,
++                        fixture.EXPECTED_MIME,
++                        fixture.EXPECTED_BYTES,
++                    )
++                ],
++            ),
++            {
++                "content-type": f"multipart/form-data; boundary={boundary}",
++                "x-api-key": fixture.EXPECTED_API_KEY,
++            },
++        )
++        self.assertEqual(status, 200)
++
++        base_message = {
++            "messages": [
++                {
++                    "role": "user",
++                    "content": [
++                        {
++                            "type": "document",
++                            "source": {"type": "file", "file_id": fixture.FILE_ID},
++                        }
++                    ],
++                }
++            ],
++            "metadata": {"user_id": "cherry_topic_v1_test"},
++            "model": fixture.EXPECTED_MODEL,
++        }
++        cases = [
++            ({**base_message, "model": "wrong-model"}, "model"),
++            ({**base_message, "tools": []}, "strip tools"),
++            (
++                {
++                    **base_message,
++                    "messages": [
++                        {
++                            "role": "user",
++                            "content": [
++                                *base_message["messages"][0]["content"],
++                                {
++                                    "type": "document",
++                                    "source": {
++                                        "type": "base64",
++                                        "media_type": fixture.EXPECTED_MIME,
++                                        "data": "Q0xFV0RS",
++                                    },
++                                },
++                            ],
++                        }
++                    ],
++                },
++                "base64",
++            ),
++        ]
++        for payload, expected_detail in cases:
++            with self.subTest(expected_detail=expected_detail):
++                status, response = self._request(
++                    "POST",
++                    "/v1/messages",
++                    json.dumps(payload).encode(),
++                    {
++                        "content-type": "application/json",
++                        "x-api-key": fixture.EXPECTED_API_KEY,
++                    },
++                )
++                self.assertEqual(status, 400)
++                self.assertIn(expected_detail, response["detail"])
++
++    def _request(
++        self,
++        method: str,
++        path: str,
++        body: bytes | None = None,
++        headers: dict[str, str] | None = None,
++    ) -> tuple[int, dict[str, object]]:
++        self.connection.request(method, path, body, headers or {})
++        response = self.connection.getresponse()
++        return response.status, json.loads(response.read())
++
++
++def _multipart(boundary: str, parts: list[tuple[str, str, str, bytes]]) -> bytes:
++    body = bytearray()
++    for name, filename, mime_type, data in parts:
++        body.extend(f"--{boundary}\r\n".encode())
++        body.extend(
++            f'Content-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'.encode()
++        )
++        body.extend(f"Content-Type: {mime_type}\r\n\r\n".encode())
++        body.extend(data)
++        body.extend(b"\r\n")
++    body.extend(f"--{boundary}--\r\n".encode())
++    return bytes(body)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/src/ai/provider/custom/__tests__/clewdrProvider.test.ts b/src/ai/provider/custom/__tests__/clewdrProvider.test.ts
+index 0f2487e..10c87a4 100644
+--- a/src/ai/provider/custom/__tests__/clewdrProvider.test.ts
++++ b/src/ai/provider/custom/__tests__/clewdrProvider.test.ts
+@@ -328,6 +328,13 @@ describe('Clewdr request boundary', () => {
+       size_bytes: 4,
+       type: 'file',
+     }),
++    JSON.stringify({
++      filename: 'project.zip',
++      id: 'file_clewdr_runtime_smoke',
++      mime_type: 'application/zip',
++      size_bytes: 4,
++      type: 'file',
++    }),
+   ])('rejects invalid upload response %s', async (payload) => {
+     const upstream = jest.fn(async (input: RequestInfo | URL) =>
+       String(input).endsWith('/files') ? new Response(payload, { status: 200 }) : okStream(),
+@@ -381,9 +388,8 @@ describe('Clewdr request boundary', () => {
+       return new Response(
+         JSON.stringify({
+           error: {
+-            code: 'conversation_expired',
+             message: 'expired',
+-            type: 'invalid_request_error',
++            type: 'conversation_expired',
+           },
+           type: 'error',
+         }),
+@@ -414,7 +420,7 @@ describe('Clewdr request boundary', () => {
+       async () =>
+         new Response(
+           JSON.stringify({
+-            error: { code: 'file_expired', message: 'expired file', type: 'invalid_request_error' },
++            error: { message: 'expired file', type: 'file_expired' },
+             type: 'error',
+           }),
+           { status: 410 },
+@@ -428,7 +434,7 @@ describe('Clewdr request boundary', () => {
+ 
+     expect(response.status).toBe(410);
+     expect(upstream).toHaveBeenCalledTimes(1);
+-    await expect(response.json()).resolves.toMatchObject({ error: { code: 'file_expired' } });
++    await expect(response.json()).resolves.toMatchObject({ error: { type: 'file_expired' } });
+   });
+ 
+   it('requires an installation client ID when session preparation is enabled', () => {
+diff --git a/src/ai/provider/custom/clewdrProvider.ts b/src/ai/provider/custom/clewdrProvider.ts
+index 6de905c..0c32634 100644
+--- a/src/ai/provider/custom/clewdrProvider.ts
++++ b/src/ai/provider/custom/clewdrProvider.ts
+@@ -144,7 +144,7 @@ async function isConversationExpired(response: Response): Promise<boolean> {
+     return (
+       isJsonObject(payload) &&
+       isJsonObject(payload.error) &&
+-      payload.error.code === 'conversation_expired'
++      payload.error.type === 'conversation_expired'
+     );
+   } catch {
+     return false;
+@@ -293,7 +293,7 @@ function isStagedFileResponse(value: unknown): value is StagedFileResponse {
+     isJsonObject(value) &&
+     typeof value.filename === 'string' &&
+     typeof value.id === 'string' &&
+-    /^file_clewdr_/.test(value.id) &&
++    /^file_clewdr_v1_/.test(value.id) &&
+     typeof value.mime_type === 'string' &&
+     typeof value.size_bytes === 'number' &&
+     value.type === 'file'
+diff --git a/src/ai/runtime/__tests__/clewdrRuntimeSmoke.test.ts b/src/ai/runtime/__tests__/clewdrRuntimeSmoke.test.ts
+new file mode 100644
+index 0000000..3bb9640
+--- /dev/null
++++ b/src/ai/runtime/__tests__/clewdrRuntimeSmoke.test.ts
+@@ -0,0 +1,42 @@
++import { parseClewdrRuntimeSmokeUrl } from '../clewdrRuntimeSmoke';
++
++jest.mock('expo/fetch', () => ({ fetch: jest.fn() }));
++
++describe('Clewdr runtime smoke URL', () => {
++  it('accepts only the exact smoke deep link with an HTTP endpoint', () => {
++    expect(
++      parseClewdrRuntimeSmokeUrl(
++        'cherrystudio://clewdr-runtime-smoke?endpoint=http%3A%2F%2F10.0.2.2%3A18484',
++      ),
++    ).toEqual({ endpoint: 'http://10.0.2.2:18484' });
++
++    expect(
++      parseClewdrRuntimeSmokeUrl('cherrystudio://settings?endpoint=http%3A%2F%2Flocalhost%3A18484'),
++    ).toBeNull();
++    expect(
++      parseClewdrRuntimeSmokeUrl(
++        'cherry-studio://clewdr-runtime-smoke?endpoint=http%3A%2F%2Flocalhost%3A18484',
++      ),
++    ).toBeNull();
++    expect(
++      parseClewdrRuntimeSmokeUrl(
++        'https://clewdr-runtime-smoke?endpoint=http%3A%2F%2Flocalhost%3A18484',
++      ),
++    ).toBeNull();
++    expect(
++      parseClewdrRuntimeSmokeUrl(
++        'cherrystudio://clewdr-runtime-smoke?endpoint=file%3A%2F%2Ffixture',
++      ),
++    ).toBeNull();
++    expect(
++      parseClewdrRuntimeSmokeUrl(
++        'cherrystudio://clewdr-runtime-smoke/extra?endpoint=http%3A%2F%2Flocalhost%3A18484',
++      ),
++    ).toBeNull();
++    expect(
++      parseClewdrRuntimeSmokeUrl(
++        'cherrystudio://clewdr-runtime-smoke?endpoint=http%3A%2F%2Flocalhost%3A18484&extra=1',
++      ),
++    ).toBeNull();
++  });
++});
+diff --git a/src/ai/runtime/clewdrRuntimeSmoke.ts b/src/ai/runtime/clewdrRuntimeSmoke.ts
+new file mode 100644
+index 0000000..0d35415
+--- /dev/null
++++ b/src/ai/runtime/clewdrRuntimeSmoke.ts
+@@ -0,0 +1,114 @@
++import { createAgent } from '@cherrystudio/ai-core';
++import { fetch as expoFetch } from 'expo/fetch';
++
++import '../provider/factory';
++import type { AppProviderSettingsMap } from '../types';
++
++const SMOKE_SCHEME = 'cherrystudio:';
++const SMOKE_HOST = 'clewdr-runtime-smoke';
++const SMOKE_FILENAME = 'clewdr-runtime-smoke.bin';
++const SMOKE_MEDIA_TYPE = 'application/octet-stream';
++const SMOKE_BYTES = new Uint8Array([0x43, 0x4c, 0x45, 0x57, 0x44, 0x52]);
++const SMOKE_CLIENT_ID = '00000000-0000-4000-8000-000000000001';
++const runtimeFetch = ((
++  input: Parameters<typeof globalThis.fetch>[0],
++  init?: Parameters<typeof globalThis.fetch>[1],
++) => {
++  const url = input instanceof Request ? input.url : input.toString();
++  const expoInit = {
++    ...init,
++    body: init?.body ?? undefined,
++    headers: new Headers(init?.headers),
++  } as Parameters<typeof expoFetch>[1];
++  return expoFetch(url, expoInit);
++}) as typeof globalThis.fetch;
++
++export interface ClewdrRuntimeSmokeOptions {
++  endpoint: string;
++}
++
++interface SmokeResult {
++  status: 'success' | 'failure';
++  answer?: string;
++  error?: string;
++  rawTypes?: string[];
++}
++
++export function parseClewdrRuntimeSmokeUrl(url: string): ClewdrRuntimeSmokeOptions | null {
++  try {
++    const parsed = new URL(url);
++    if (parsed.protocol !== SMOKE_SCHEME || parsed.hostname !== SMOKE_HOST) return null;
++    if (parsed.pathname || parsed.hash) return null;
++    const queryKeys = [...parsed.searchParams.keys()];
++    if (queryKeys.length !== 1 || queryKeys[0] !== 'endpoint') return null;
++
++    const endpointValue = parsed.searchParams.get('endpoint');
++    if (!endpointValue) return null;
++    const endpoint = new URL(endpointValue);
++    if (endpoint.protocol !== 'http:' && endpoint.protocol !== 'https:') return null;
++    endpoint.search = '';
++    endpoint.hash = '';
++    endpoint.pathname = endpoint.pathname.replace(/\/+$/, '');
++    return { endpoint: endpoint.toString().replace(/\/$/, '') };
++  } catch {
++    return null;
++  }
++}
++
++export async function runClewdrRuntimeSmoke(options: ClewdrRuntimeSmokeOptions): Promise<void> {
++  let result: SmokeResult;
++  try {
++    const agent = await createAgent<AppProviderSettingsMap, 'clewdr'>({
++      agentSettings: { includeRawChunks: true, maxRetries: 0 },
++      modelId: 'claude-runtime-smoke',
++      providerId: 'clewdr',
++      providerSettings: {
++        apiKey: 'ci-runtime-smoke',
++        baseURL: `${options.endpoint}/v1`,
++        clientId: SMOKE_CLIENT_ID,
++        fetch: runtimeFetch,
++        sessionId: 'ci-runtime-topic',
++      },
++    });
++    const stream = await agent.stream({
++      messages: [
++        {
++          content: [
++            { text: 'Read the attached runtime smoke payload.', type: 'text' },
++            {
++              data: SMOKE_BYTES,
++              filename: SMOKE_FILENAME,
++              mediaType: SMOKE_MEDIA_TYPE,
++              type: 'file',
++            },
++          ],
++          role: 'user',
++        },
++      ],
++    });
++    let answer = '';
++    const rawTypes: string[] = [];
++    for await (const chunk of stream.fullStream) {
++      if (chunk.type === 'text-delta') answer += chunk.text;
++      if (chunk.type === 'raw') {
++        const rawValue = chunk.rawValue;
++        if (isRecord(rawValue) && typeof rawValue.type === 'string') {
++          rawTypes.push(rawValue.type);
++        }
++      }
++    }
++    result = { answer, rawTypes, status: 'success' };
++  } catch (error) {
++    result = { error: error instanceof Error ? error.message : String(error), status: 'failure' };
++  }
++
++  await expoFetch(`${options.endpoint}/result`, {
++    body: JSON.stringify(result),
++    headers: { 'content-type': 'application/json' },
++    method: 'POST',
++  });
++}
++
++function isRecord(value: unknown): value is Record<string, unknown> {
++  return typeof value === 'object' && value !== null && !Array.isArray(value);
++}
+diff --git a/src/app/_layout.tsx b/src/app/_layout.tsx
+index 937539f..af38738 100644
+--- a/src/app/_layout.tsx
++++ b/src/app/_layout.tsx
+@@ -7,6 +7,7 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
+ import { KeyboardProvider } from 'react-native-keyboard-controller';
+ import { withUniwind } from 'uniwind';
+ 
++import { ClewdrRuntimeSmokeGate } from '@/components/clewdrRuntimeSmoke';
+ import { DrawerRoot } from '@/components/drawer';
+ import { NavigationThemeProvider } from '@/components/navigation';
+ import { DataProvider, InitialDataGate, QueryProvider } from '@/data';
+@@ -20,22 +21,24 @@ const RootGestureView = withUniwind(GestureHandlerRootView);
+ 
+ export default function RootLayout() {
+   return (
+-    <RootGestureView className="flex-1">
+-      <KeyboardProvider>
+-        <HeroUINativeProvider config={{ devInfo: { stylingPrinciples: false } }}>
+-          <QueryProvider>
+-            <DataProvider bootstrap={bootstrapAppRuntime}>
+-              <InitialDataGate>
+-                <NavigationThemeProvider>
+-                  <BottomSheetProvider>
+-                    <DrawerRoot />
+-                  </BottomSheetProvider>
+-                </NavigationThemeProvider>
+-              </InitialDataGate>
+-            </DataProvider>
+-          </QueryProvider>
+-        </HeroUINativeProvider>
+-      </KeyboardProvider>
+-    </RootGestureView>
++    <ClewdrRuntimeSmokeGate>
++      <RootGestureView className="flex-1">
++        <KeyboardProvider>
++          <HeroUINativeProvider config={{ devInfo: { stylingPrinciples: false } }}>
++            <QueryProvider>
++              <DataProvider bootstrap={bootstrapAppRuntime}>
++                <InitialDataGate>
++                  <NavigationThemeProvider>
++                    <BottomSheetProvider>
++                      <DrawerRoot />
++                    </BottomSheetProvider>
++                  </NavigationThemeProvider>
++                </InitialDataGate>
++              </DataProvider>
++            </QueryProvider>
++          </HeroUINativeProvider>
++        </KeyboardProvider>
++      </RootGestureView>
++    </ClewdrRuntimeSmokeGate>
+   );
+ }
+diff --git a/src/components/clewdrRuntimeSmoke/ClewdrRuntimeSmokeGate.tsx b/src/components/clewdrRuntimeSmoke/ClewdrRuntimeSmokeGate.tsx
+new file mode 100644
+index 0000000..9a201d7
+--- /dev/null
++++ b/src/components/clewdrRuntimeSmoke/ClewdrRuntimeSmokeGate.tsx
+@@ -0,0 +1,45 @@
++import Constants from 'expo-constants';
++import { type ReactNode, useEffect, useState } from 'react';
++import { ActivityIndicator, Linking } from 'react-native';
++
++import {
++  type ClewdrRuntimeSmokeOptions,
++  parseClewdrRuntimeSmokeUrl,
++  runClewdrRuntimeSmoke,
++} from '@/ai/runtime/clewdrRuntimeSmoke';
++
++interface ClewdrRuntimeSmokeGateProps {
++  children: ReactNode;
++}
++
++export function isClewdrRuntimeSmokeEnabled(
++  publicFlag = process.env.EXPO_PUBLIC_CLEWDR_RUNTIME_SMOKE,
++  ciFlag = Constants.expoConfig?.extra?.clewdrRuntimeSmokeCi === true,
++): boolean {
++  return publicFlag === '1' && ciFlag;
++}
++
++export function ClewdrRuntimeSmokeGate({ children }: ClewdrRuntimeSmokeGateProps) {
++  const [smokeOptions, setSmokeOptions] = useState<ClewdrRuntimeSmokeOptions | null>(null);
++  const enabled = isClewdrRuntimeSmokeEnabled();
++
++  useEffect(() => {
++    if (!enabled) return;
++
++    const acceptUrl = (url: string | null) => {
++      if (!url) return;
++      const options = parseClewdrRuntimeSmokeUrl(url);
++      if (options) setSmokeOptions(options);
++    };
++    const subscription = Linking.addEventListener('url', (event) => acceptUrl(event.url));
++    void Linking.getInitialURL().then(acceptUrl);
++    return () => subscription.remove();
++  }, [enabled]);
++
++  useEffect(() => {
++    if (enabled && smokeOptions) void runClewdrRuntimeSmoke(smokeOptions);
++  }, [enabled, smokeOptions]);
++
++  if (enabled && smokeOptions) return <ActivityIndicator size="large" />;
++  return <>{children}</>;
++}
+diff --git a/src/components/clewdrRuntimeSmoke/__tests__/ClewdrRuntimeSmokeGate.test.ts b/src/components/clewdrRuntimeSmoke/__tests__/ClewdrRuntimeSmokeGate.test.ts
+new file mode 100644
+index 0000000..a20abf3
+--- /dev/null
++++ b/src/components/clewdrRuntimeSmoke/__tests__/ClewdrRuntimeSmokeGate.test.ts
+@@ -0,0 +1,12 @@
++import { isClewdrRuntimeSmokeEnabled } from '../ClewdrRuntimeSmokeGate';
++
++describe('Clewdr runtime smoke gate', () => {
++  it.each([
++    ['1', true, true],
++    [undefined, true, false],
++    ['1', false, false],
++    [undefined, false, false],
++  ] as const)('requires the public build flag and CI config flag', (publicFlag, ciFlag, expected) => {
++    expect(isClewdrRuntimeSmokeEnabled(publicFlag, ciFlag)).toBe(expected);
++  });
++});
+diff --git a/src/components/clewdrRuntimeSmoke/index.ts b/src/components/clewdrRuntimeSmoke/index.ts
+new file mode 100644
+index 0000000..c643e51
+--- /dev/null
++++ b/src/components/clewdrRuntimeSmoke/index.ts
+@@ -0,0 +1 @@
++export { ClewdrRuntimeSmokeGate } from './ClewdrRuntimeSmokeGate';

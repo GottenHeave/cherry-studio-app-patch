@@ -1,0 +1,437 @@
+From b5f152bf8ac07c4ec9c9fae62a9efad3031519da Mon Sep 17 00:00:00 2001
+From: GottenHeave <274621501+GottenHeave@users.noreply.github.com>
+Date: Thu, 16 Jul 2026 17:37:54 +0000
+Subject: [PATCH 2/5] fix(clewdr-provider): harden mobile session boundaries
+
+Signed-off-by: GottenHeave <274621501+GottenHeave@users.noreply.github.com>
+---
+ .../ai-core/src/core/agents/createAgent.ts    |   9 +-
+ src/ai/AiService.ts                           |   7 +-
+ src/ai/__tests__/AiService.test.ts            |  32 +++++
+ .../provider/__tests__/clewdrRegistry.test.ts |   2 +-
+ .../clewdrAnthropicCompatibility.test.ts      |  33 ++++--
+ .../custom/__tests__/clewdrProvider.test.ts   | 111 +++++++++++++++++-
+ src/ai/provider/custom/clewdrProvider.ts      |   5 +-
+ src/ai/provider/extensions/index.ts           |   2 +-
+ src/ai/runtime/aiSdk/Agent.ts                 |   1 +
+ src/ai/runtime/aiSdk/__tests__/Agent.test.ts  |  48 ++++++++
+ 10 files changed, 234 insertions(+), 16 deletions(-)
+ create mode 100644 src/ai/runtime/aiSdk/__tests__/Agent.test.ts
+
+diff --git a/packages/ai-core/src/core/agents/createAgent.ts b/packages/ai-core/src/core/agents/createAgent.ts
+index 9aff4cc..e0a01d0 100644
+--- a/packages/ai-core/src/core/agents/createAgent.ts
++++ b/packages/ai-core/src/core/agents/createAgent.ts
+@@ -9,6 +9,13 @@ import type { AiPlugin } from '../plugins';
+ import type { CoreProviderSettingsMap, StringKeys } from '../providers/types';
+ import { createExecutor } from '../runtime/createExecutor';
+ 
++type AgentSettings<TOOLS extends ToolSet> = Omit<
++  ToolLoopAgentSettings<never, TOOLS, never>,
++  'model'
++> & {
++  includeRawChunks?: boolean;
++};
++
+ export type CreateAgentOptions<
+   TSettingsMap extends Record<string, any> = CoreProviderSettingsMap,
+   T extends StringKeys<TSettingsMap> = StringKeys<TSettingsMap>,
+@@ -18,7 +25,7 @@ export type CreateAgentOptions<
+   providerSettings: TSettingsMap[T];
+   modelId: string;
+   plugins?: AiPlugin[];
+-  agentSettings: Omit<ToolLoopAgentSettings<never, TOOLS, never>, 'model'>;
++  agentSettings: AgentSettings<TOOLS>;
+ };
+ 
+ export async function createAgent<
+diff --git a/src/ai/AiService.ts b/src/ai/AiService.ts
+index 969d104..18dfafd 100644
+--- a/src/ai/AiService.ts
++++ b/src/ai/AiService.ts
+@@ -28,11 +28,11 @@ import { createWebSearchTool, WEB_SEARCH_TOOL_NAME } from './createWebSearchTool
+ import { resolveMediaCapabilities } from './messages/messageCapabilities';
+ import { resolveUIMessageFileUrls } from './messages/messageConverter';
+ import { providerToAiSdkConfig } from './provider/config';
++import { getClewdrInstallationId } from './provider/custom/clewdrInstallation';
+ import {
+   type ClewdrProviderSettings,
+   normalizeClewdrEndpoint,
+ } from './provider/custom/clewdrProvider';
+-import { getClewdrInstallationId } from './provider/custom/clewdrInstallation';
+ import { listModels as listProviderModels } from './provider/listModels';
+ import { Agent } from './runtime/aiSdk/Agent';
+ import { createAnthropicCachePlugin } from './runtime/aiSdk/plugins/anthropicCache';
+@@ -338,7 +338,10 @@ export class AiService {
+       getAuthConfig: (providerId) => this.services.provider.getAuthConfig(providerId),
+     });
+     const isClewdr = sdkConfig.providerId === 'clewdr';
+-    if (isClewdr && request.chatId) {
++    if (isClewdr && request.chatId !== undefined) {
++      if (!request.chatId) {
++        throw new Error('Clewdr session preparation requires a topic ID');
++      }
+       const settings = sdkConfig.providerSettings as ClewdrProviderSettings;
+       if (!settings.baseURL) {
+         throw new Error('Clewdr session preparation requires a configured endpoint');
+diff --git a/src/ai/__tests__/AiService.test.ts b/src/ai/__tests__/AiService.test.ts
+index 4431eda..ddeeabd 100644
+--- a/src/ai/__tests__/AiService.test.ts
++++ b/src/ai/__tests__/AiService.test.ts
+@@ -478,6 +478,38 @@ describe('AiService web search plugin wiring', () => {
+     expect(auxiliaryParams.providerSettings).not.toHaveProperty('clientId');
+     expect(auxiliaryParams.providerSettings).not.toHaveProperty('sessionId');
+   });
++
++  it('rejects an empty Clewdr chat ID before constructing an agent', async () => {
++    const provider = createProvider({
++      defaultChatEndpoint: ENDPOINT_TYPE.ANTHROPIC_MESSAGES,
++      endpointConfigs: {
++        [ENDPOINT_TYPE.ANTHROPIC_MESSAGES]: {
++          adapterFamily: 'clewdr',
++          baseUrl: 'https://clewdr.example/v1',
++        },
++      },
++      id: 'clewdr',
++      name: 'ClewdR',
++      presetProviderId: 'clewdr',
++    });
++    const model = createModel('claude-sonnet-4-6', {
++      endpointTypes: [ENDPOINT_TYPE.ANTHROPIC_MESSAGES],
++      providerId: 'clewdr',
++    });
++    const assistant = createAssistant(model.id);
++    const service = new AiService(createServices({ assistant, model, provider }));
++
++    await expect(
++      service.streamText({
++        assistantId: assistant.id,
++        chatId: '',
++        messages: [],
++        requestOptions: { signal: new AbortController().signal },
++        trigger: 'submit-message',
++      }),
++    ).rejects.toThrow('topic ID');
++    expect(mockAgentConstructor).not.toHaveBeenCalled();
++  });
+ });
+ 
+ function createServices({
+diff --git a/src/ai/provider/__tests__/clewdrRegistry.test.ts b/src/ai/provider/__tests__/clewdrRegistry.test.ts
+index c5e643e..491e7de 100644
+--- a/src/ai/provider/__tests__/clewdrRegistry.test.ts
++++ b/src/ai/provider/__tests__/clewdrRegistry.test.ts
+@@ -1,6 +1,6 @@
+ import { extensionRegistry } from '@cherrystudio/ai-core/provider';
+-import { MobileRegistryLoader } from '@cherrystudio/provider-registry/mobile';
+ import { ENDPOINT_TYPE } from '@cherrystudio/provider-registry';
++import { MobileRegistryLoader } from '@cherrystudio/provider-registry/mobile';
+ import { createUniqueModelId, type Model } from '@/data/types/model';
+ import type { Provider } from '@/data/types/provider';
+ 
+diff --git a/src/ai/provider/custom/__tests__/clewdrAnthropicCompatibility.test.ts b/src/ai/provider/custom/__tests__/clewdrAnthropicCompatibility.test.ts
+index d6065bd..fd7437d 100644
+--- a/src/ai/provider/custom/__tests__/clewdrAnthropicCompatibility.test.ts
++++ b/src/ai/provider/custom/__tests__/clewdrAnthropicCompatibility.test.ts
+@@ -1,7 +1,9 @@
+ import { createAnthropic } from '@ai-sdk/anthropic';
+ import type { LanguageModelV3CallOptions, LanguageModelV3StreamPart } from '@ai-sdk/provider';
+-import { streamText } from 'ai';
++import { createAgent } from '@cherrystudio/ai-core';
+ 
++import type { AppProviderSettingsMap } from '../../../types';
++import '../../factory';
+ import { createClewdrProvider } from '../clewdrProvider';
+ 
+ const filePrompt: LanguageModelV3CallOptions = {
+@@ -71,6 +73,12 @@ async function collectClewdrStream(body: string) {
+   return chunks;
+ }
+ 
++async function collectStream<T>(stream: AsyncIterable<T>): Promise<T[]> {
++  const chunks: T[] = [];
++  for await (const chunk of stream) chunks.push(chunk);
++  return chunks;
++}
++
+ describe('Clewdr Anthropic SDK boundary', () => {
+   it('serializes arbitrary Clewdr files as base64 documents', async () => {
+     const body = await captureRequest((fetch) =>
+@@ -146,7 +154,7 @@ describe('Clewdr Anthropic SDK boundary', () => {
+     );
+   });
+ 
+-  it('continues through the AI SDK streamText chain after a Clewdr extension event', async () => {
++  it('exposes a Clewdr extension event on the Agent full stream but not the UI stream', async () => {
+     const events = [
+       { type: 'conversation_ready' },
+       {
+@@ -173,13 +181,24 @@ describe('Clewdr Anthropic SDK boundary', () => {
+       createEventStreamResponse(
+         events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(''),
+       )) as typeof globalThis.fetch;
+-    const result = streamText({
+-      maxRetries: 0,
+-      model: createClewdrProvider({ apiKey: 'test', fetch }).languageModel('claude-sonnet-4-6'),
+-      prompt: 'hello',
++    const agent = await createAgent<AppProviderSettingsMap, 'clewdr'>({
++      agentSettings: { includeRawChunks: true, maxRetries: 0 },
++      modelId: 'claude-sonnet-4-6',
++      providerId: 'clewdr',
++      providerSettings: { apiKey: 'test', fetch },
+     });
++    const result = await agent.stream({ prompt: 'hello' });
++    const chunks = await collectStream(result.fullStream);
+ 
+-    await expect(result.text).resolves.toBe('answer');
++    expect(chunks).toContainEqual({ rawValue: events[0], type: 'raw' });
++    expect(chunks).toContainEqual(expect.objectContaining({ text: 'answer', type: 'text-delta' }));
++
++    const uiResult = await agent.stream({ prompt: 'hello' });
++    const uiChunks = await collectStream(uiResult.toUIMessageStream());
++    expect(uiChunks.map((chunk) => chunk.type)).not.toContain('raw');
++    expect(uiChunks).toContainEqual(
++      expect.objectContaining({ delta: 'answer', type: 'text-delta' }),
++    );
+   });
+ 
+   it('keeps remote tool activity as raw chunks without emitting tool calls', async () => {
+diff --git a/src/ai/provider/custom/__tests__/clewdrProvider.test.ts b/src/ai/provider/custom/__tests__/clewdrProvider.test.ts
+index 66f5832..0f2487e 100644
+--- a/src/ai/provider/custom/__tests__/clewdrProvider.test.ts
++++ b/src/ai/provider/custom/__tests__/clewdrProvider.test.ts
+@@ -147,7 +147,7 @@ describe('Clewdr request boundary', () => {
+         return new Response(
+           JSON.stringify({
+             filename: 'project.zip',
+-            id: `file-${uploads}`,
++            id: `file_clewdr_v1_${uploads}`,
+             mime_type: 'application/zip',
+             size_bytes: 4,
+             type: 'file',
+@@ -189,6 +189,102 @@ describe('Clewdr request boundary', () => {
+     expect(uploads).toBe(4);
+   });
+ 
++  it('isolates cached uploads by endpoint and API principal', async () => {
++    let uploads = 0;
++    const upstream = jest.fn(async (input: RequestInfo | URL) => {
++      if (String(input).endsWith('/files')) {
++        uploads += 1;
++        return new Response(
++          JSON.stringify({
++            filename: 'cache-scope.zip',
++            id: `file_clewdr_v1_scope_${uploads}`,
++            mime_type: 'application/zip',
++            size_bytes: 4,
++            type: 'file',
++          }),
++          { status: 200 },
++        );
++      }
++      return okStream();
++    }) as typeof globalThis.fetch;
++    const otherEndpoint = 'https://other-clewdr.example/api/v1';
++    const body = JSON.stringify(makeBody('cache-scope.zip'));
++    const sameScope = makeFetch(upstream);
++    const endpointScope = createClewdrFetch({
++      apiKey: 'secret-key',
++      clientId,
++      fetch: upstream,
++      normalizedEndpoint: otherEndpoint,
++      sessionId: topicId,
++    });
++    const principalScope = createClewdrFetch({
++      apiKey: 'other-secret-key',
++      clientId,
++      fetch: upstream,
++      normalizedEndpoint,
++      sessionId: topicId,
++    });
++
++    await sameScope(messagesUrl, { body, method: 'POST' });
++    await sameScope(messagesUrl, { body, method: 'POST' });
++    await endpointScope(`${otherEndpoint}/messages`, { body, method: 'POST' });
++    await principalScope(messagesUrl, { body, method: 'POST' });
++
++    expect(uploads).toBe(3);
++  });
++
++  it('uploads and rewrites base64 image sources', async () => {
++    let messageBody: Record<string, unknown> | undefined;
++    const upstream = jest.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
++      if (String(input).endsWith('/files')) {
++        return new Response(
++          JSON.stringify({
++            filename: 'pixel.png',
++            id: 'file_clewdr_v1_image',
++            mime_type: 'image/png',
++            size_bytes: 8,
++            type: 'file',
++          }),
++          { status: 200 },
++        );
++      }
++      messageBody = JSON.parse(String(init?.body));
++      return okStream();
++    }) as typeof globalThis.fetch;
++
++    await makeFetch(upstream)(messagesUrl, {
++      body: JSON.stringify({
++        messages: [
++          {
++            content: [
++              {
++                source: { data: 'iVBORw0KGgo=', media_type: 'image/png', type: 'base64' },
++                title: 'pixel.png',
++                type: 'image',
++              },
++            ],
++            role: 'user',
++          },
++        ],
++        model: 'claude-sonnet-4-6',
++      }),
++      method: 'POST',
++    });
++
++    expect(messageBody).toMatchObject({
++      messages: [
++        {
++          content: [
++            {
++              source: { file_id: 'file_clewdr_v1_image', type: 'file' },
++              type: 'image',
++            },
++          ],
++        },
++      ],
++    });
++  });
++
+   it('passes non-message requests through without rewriting them', async () => {
+     const upstream = jest.fn(async () => new Response('{}', { status: 200 }));
+     const body = JSON.stringify(makeBody());
+@@ -223,9 +319,18 @@ describe('Clewdr request boundary', () => {
+     expect(headers.get('x-init')).toBe('keep-init');
+   });
+ 
+-  it('rejects invalid upload responses', async () => {
++  it.each([
++    '{"id":42}',
++    JSON.stringify({
++      filename: 'project.zip',
++      id: 'ordinary-file-id',
++      mime_type: 'application/zip',
++      size_bytes: 4,
++      type: 'file',
++    }),
++  ])('rejects invalid upload response %s', async (payload) => {
+     const upstream = jest.fn(async (input: RequestInfo | URL) =>
+-      String(input).endsWith('/files') ? new Response('{"id":42}', { status: 200 }) : okStream(),
++      String(input).endsWith('/files') ? new Response(payload, { status: 200 }) : okStream(),
+     ) as typeof globalThis.fetch;
+ 
+     await expect(
+diff --git a/src/ai/provider/custom/clewdrProvider.ts b/src/ai/provider/custom/clewdrProvider.ts
+index 97f4f39..6de905c 100644
+--- a/src/ai/provider/custom/clewdrProvider.ts
++++ b/src/ai/provider/custom/clewdrProvider.ts
+@@ -260,7 +260,9 @@ function normalizeFilename(filename: string): string {
+ 
+ function mergeHeaders(input: RequestInfo | URL, headers: HeadersInit | undefined): Headers {
+   const merged = input instanceof Request ? new Headers(input.headers) : new Headers();
+-  new Headers(headers).forEach((value, key) => merged.set(key, value));
++  new Headers(headers).forEach((value, key) => {
++    merged.set(key, value);
++  });
+   return merged;
+ }
+ 
+@@ -291,6 +293,7 @@ function isStagedFileResponse(value: unknown): value is StagedFileResponse {
+     isJsonObject(value) &&
+     typeof value.filename === 'string' &&
+     typeof value.id === 'string' &&
++    /^file_clewdr_/.test(value.id) &&
+     typeof value.mime_type === 'string' &&
+     typeof value.size_bytes === 'number' &&
+     value.type === 'file'
+diff --git a/src/ai/provider/extensions/index.ts b/src/ai/provider/extensions/index.ts
+index 165cf75..fc5cb75 100644
+--- a/src/ai/provider/extensions/index.ts
++++ b/src/ai/provider/extensions/index.ts
+@@ -1,7 +1,7 @@
+ /** App-specific Provider Extensions registered alongside `coreExtensions`. */
+ 
+-import { type CerebrasProviderSettings, createCerebras } from '@ai-sdk/cerebras';
+ import type { AnthropicProvider } from '@ai-sdk/anthropic';
++import { type CerebrasProviderSettings, createCerebras } from '@ai-sdk/cerebras';
+ import { createGateway, type GatewayProviderSettings } from '@ai-sdk/gateway';
+ import { createGroq, type GroqProviderSettings } from '@ai-sdk/groq';
+ import { createHuggingFace, type HuggingFaceProviderSettings } from '@ai-sdk/huggingface';
+diff --git a/src/ai/runtime/aiSdk/Agent.ts b/src/ai/runtime/aiSdk/Agent.ts
+index d814210..6ad5c47 100644
+--- a/src/ai/runtime/aiSdk/Agent.ts
++++ b/src/ai/runtime/aiSdk/Agent.ts
+@@ -89,6 +89,7 @@ export class Agent<T extends AppProviderKey = AppProviderKey> {
+         // Provider-specific
+         providerOptions: opts.providerOptions,
+         stopWhen: opts.stopWhen,
++        ...(params.providerId === 'clewdr' && { includeRawChunks: true }),
+       },
+     });
+   }
+diff --git a/src/ai/runtime/aiSdk/__tests__/Agent.test.ts b/src/ai/runtime/aiSdk/__tests__/Agent.test.ts
+new file mode 100644
+index 0000000..8120c6d
+--- /dev/null
++++ b/src/ai/runtime/aiSdk/__tests__/Agent.test.ts
+@@ -0,0 +1,48 @@
++import { createAgent } from '@cherrystudio/ai-core';
++
++import { Agent } from '../Agent';
++
++const mockAgentStream = jest.fn(async () => ({
++  toUIMessageStream: () =>
++    new ReadableStream({
++      start(controller) {
++        controller.close();
++      },
++    }),
++}));
++
++jest.mock('@cherrystudio/ai-core', () => ({
++  createAgent: jest.fn(async () => ({ stream: mockAgentStream })),
++}));
++
++const createAgentMock = createAgent as jest.MockedFunction<typeof createAgent>;
++
++async function consume(stream: ReadableStream): Promise<void> {
++  await stream.pipeTo(new WritableStream());
++}
++
++describe('Agent Clewdr streaming', () => {
++  beforeEach(() => {
++    jest.clearAllMocks();
++  });
++
++  it.each([
++    ['clewdr', true],
++    ['anthropic', undefined],
++  ] as const)('sets raw chunk visibility only for the %s provider', async (providerId, expected) => {
++    const agent = new Agent({
++      modelId: 'claude-sonnet-4-6',
++      providerId,
++      providerSettings: { apiKey: 'test' },
++    });
++
++    await consume(agent.stream([], new AbortController().signal));
++
++    const settings = createAgentMock.mock.calls[0][0].agentSettings;
++    if (expected) {
++      expect(settings.includeRawChunks).toBe(true);
++    } else {
++      expect(settings).not.toHaveProperty('includeRawChunks');
++    }
++  });
++});

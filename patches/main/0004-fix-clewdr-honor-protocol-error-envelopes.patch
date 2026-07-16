@@ -1,0 +1,607 @@
+From 18202de29f2c904fb9509936011d9255a74382fb Mon Sep 17 00:00:00 2001
+From: GottenHeave <274621501+GottenHeave@users.noreply.github.com>
+Date: Thu, 16 Jul 2026 17:58:51 +0000
+Subject: [PATCH 4/4] fix(clewdr): honor protocol error envelopes
+
+Signed-off-by: GottenHeave <274621501+GottenHeave@users.noreply.github.com>
+---
+ scripts/ci/clewdr_runtime_fixture.py          |  82 +++++++--
+ scripts/ci/test_clewdr_runtime_fixture.py     | 172 ++++++++++++++++--
+ .../provider/__tests__/clewdrProvider.test.ts |  52 ++++--
+ src/aiCore/provider/clewdrProvider.ts         |  13 +-
+ 4 files changed, 267 insertions(+), 52 deletions(-)
+
+diff --git a/scripts/ci/clewdr_runtime_fixture.py b/scripts/ci/clewdr_runtime_fixture.py
+index 172a6c5..f6d12b2 100755
+--- a/scripts/ci/clewdr_runtime_fixture.py
++++ b/scripts/ci/clewdr_runtime_fixture.py
+@@ -4,6 +4,7 @@ from __future__ import annotations
+ 
+ import argparse
+ import json
++import re
+ import threading
+ from email import policy
+ from email.parser import BytesParser
+@@ -14,8 +15,11 @@ from typing import Any
+ EXPECTED_BYTES = b"CLEWDR"
+ EXPECTED_FILENAME = "clewdr-runtime-smoke.bin"
+ EXPECTED_MIME = "application/octet-stream"
+-FILE_ID = "file_clewdr_runtime_smoke"
++FILE_ID = "file_clewdr_v1_runtime_smoke"
+ EXPECTED_ANSWER = "runtime smoke ok"
++EXPECTED_API_KEY = "ci-runtime-smoke"
++EXPECTED_MODEL = "claude-runtime-smoke"
++SESSION_ID_PATTERN = re.compile(r"^cherry_topic_v1_[0-9a-f]{64}$")
+ 
+ 
+ class FixtureState:
+@@ -23,6 +27,9 @@ class FixtureState:
+         self.lock = threading.Lock()
+         self.upload_received = False
+         self.message_received = False
++        self.file_requests = 0
++        self.message_requests = 0
++        self.reset_requests = 0
+         self.status = "pending"
+         self.detail = "waiting for native app"
+ 
+@@ -33,7 +40,15 @@ class FixtureState:
+ 
+     def snapshot(self) -> dict[str, Any]:
+         with self.lock:
+-            return {"status": self.status, "detail": self.detail}
++            return {
++                "status": self.status,
++                "detail": self.detail,
++                "requests": {
++                    "files": self.file_requests,
++                    "messages": self.message_requests,
++                    "sessions_reset": self.reset_requests,
++                },
++            }
+ 
+ 
+ class SmokeServer(ThreadingHTTPServer):
+@@ -57,6 +72,8 @@ class FixtureHandler(BaseHTTPRequestHandler):
+                 self._handle_file_upload()
+             elif self.path == "/v1/messages":
+                 self._handle_messages()
++            elif self.path == "/v1/sessions/reset":
++                self._handle_session_reset()
+             elif self.path == "/result":
+                 self._handle_result()
+             else:
+@@ -66,6 +83,9 @@ class FixtureHandler(BaseHTTPRequestHandler):
+             self._json_response(400, {"error": "invalid_smoke_request", "detail": str(error)})
+ 
+     def _handle_file_upload(self) -> None:
++        with self.server.state.lock:
++            self.server.state.file_requests += 1
++        self._require_api_key()
+         content_type = self.headers.get("content-type", "")
+         body = self._read_body()
+         message = BytesParser(policy=policy.default).parsebytes(
+@@ -102,23 +122,39 @@ class FixtureHandler(BaseHTTPRequestHandler):
+         )
+ 
+     def _handle_messages(self) -> None:
++        with self.server.state.lock:
++            self.server.state.message_requests += 1
++        self._require_api_key()
+         payload = json.loads(self._read_body())
+         with self.server.state.lock:
+             if not self.server.state.upload_received:
+                 raise ValueError("message arrived before upload")
+         if "tools" in payload or "tool_choice" in payload:
+             raise ValueError("Clewdr request must strip tools")
++        if payload.get("model") != EXPECTED_MODEL:
++            raise ValueError("message uses an unexpected model")
+         metadata = payload.get("metadata")
+-        if not isinstance(metadata, dict) or not str(metadata.get("user_id", "")).startswith("cherry_topic_v1_"):
++        if not isinstance(metadata, dict) or not SESSION_ID_PATTERN.fullmatch(str(metadata.get("user_id", ""))):
+             raise ValueError("message is missing the explicit session ID")
+-        if not _contains_file_id(payload.get("messages"), FILE_ID):
+-            raise ValueError("message does not reference the staged file")
++        messages = payload.get("messages")
++        if not isinstance(messages, list) or len(messages) != 1 or not isinstance(messages[0], dict):
++            raise ValueError("message body must contain exactly one user message")
++        user_message = messages[0]
++        if user_message.get("role") != "user" or not isinstance(user_message.get("content"), list):
++            raise ValueError("message body must contain exactly one user message")
++        content = user_message["content"]
++        for part in content:
++            if isinstance(part, dict) and isinstance(part.get("source"), dict) and part["source"].get("type") == "base64":
++                raise ValueError("message body must not contain base64 sources")
++        documents = [part for part in content if isinstance(part, dict) and part.get("type") == "document"]
++        if len(documents) != 1 or documents[0].get("source") != {"type": "file", "file_id": FILE_ID}:
++            raise ValueError("message document must reference the staged file with an exact file source")
+ 
+         with self.server.state.lock:
+             self.server.state.message_received = True
+         events = [
+             {"type": "conversation_ready"},
+-            {"type": "message_start", "message": {"id": "msg_smoke", "model": "claude-runtime-smoke", "usage": {"input_tokens": 1}}},
++            {"type": "message_start", "message": {"id": "msg_smoke", "model": EXPECTED_MODEL, "usage": {"input_tokens": 1}}},
+             {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+             {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": EXPECTED_ANSWER}},
+             {"type": "content_block_stop", "index": 0},
+@@ -132,6 +168,15 @@ class FixtureHandler(BaseHTTPRequestHandler):
+         self.end_headers()
+         self.wfile.write(body)
+ 
++    def _handle_session_reset(self) -> None:
++        with self.server.state.lock:
++            self.server.state.reset_requests += 1
++        self._require_api_key()
++        payload = json.loads(self._read_body())
++        if not SESSION_ID_PATTERN.fullmatch(str(payload.get("session_id", ""))):
++            raise ValueError("reset is missing the explicit session ID")
++        self._json_response(200, {"ok": True})
++
+     def _handle_result(self) -> None:
+         payload = json.loads(self._read_body())
+         if payload.get("status") != "success":
+@@ -144,6 +189,16 @@ class FixtureHandler(BaseHTTPRequestHandler):
+         with self.server.state.lock:
+             if not self.server.state.upload_received or not self.server.state.message_received:
+                 raise ValueError("native runner finished before the fixture protocol completed")
++            request_counts = (
++                self.server.state.file_requests,
++                self.server.state.message_requests,
++                self.server.state.reset_requests,
++            )
++            if request_counts != (1, 1, 0):
++                raise ValueError(
++                    "native runner used unexpected request counts: "
++                    f"files={request_counts[0]} messages={request_counts[1]} sessions/reset={request_counts[2]}"
++                )
+             self.server.state.status = "success"
+             self.server.state.detail = "native multipart upload and stream completed"
+         self._json_response(200, {"ok": True})
+@@ -157,6 +212,10 @@ class FixtureHandler(BaseHTTPRequestHandler):
+             raise ValueError("request body ended early")
+         return body
+ 
++    def _require_api_key(self) -> None:
++        if self.headers.get("x-api-key") != EXPECTED_API_KEY:
++            raise ValueError("request is missing the expected x-api-key")
++
+     def _json_response(self, status: int, payload: dict[str, Any]) -> None:
+         body = json.dumps(payload).encode()
+         self.send_response(status)
+@@ -168,17 +227,6 @@ class FixtureHandler(BaseHTTPRequestHandler):
+     def log_message(self, format_string: str, *args: object) -> None:
+         return
+ 
+-
+-def _contains_file_id(value: Any, file_id: str) -> bool:
+-    if isinstance(value, dict):
+-        return value.get("type") == "file" and value.get("file_id") == file_id or any(
+-            _contains_file_id(child, file_id) for child in value.values()
+-        )
+-    if isinstance(value, list):
+-        return any(_contains_file_id(child, file_id) for child in value)
+-    return False
+-
+-
+ def create_server(host: str, port: int) -> SmokeServer:
+     return SmokeServer((host, port))
+ 
+diff --git a/scripts/ci/test_clewdr_runtime_fixture.py b/scripts/ci/test_clewdr_runtime_fixture.py
+index 706e1fd..06978ef 100755
+--- a/scripts/ci/test_clewdr_runtime_fixture.py
++++ b/scripts/ci/test_clewdr_runtime_fixture.py
+@@ -7,6 +7,7 @@ import importlib.util
+ import json
+ import threading
+ import unittest
++from copy import deepcopy
+ from pathlib import Path
+ 
+ FIXTURE_PATH = Path(__file__).with_name("clewdr_runtime_fixture.py")
+@@ -30,21 +31,16 @@ class ClewdrRuntimeFixtureTest(unittest.TestCase):
+         self.thread.join(timeout=2)
+ 
+     def test_accepts_upload_message_and_native_result(self) -> None:
+-        boundary = "clewdr-smoke-boundary"
+-        upload = _multipart(boundary, [("file", fixture.EXPECTED_FILENAME, fixture.EXPECTED_MIME, fixture.EXPECTED_BYTES)])
+-        status, payload = self._request(
+-            "POST", "/v1/files", upload, {"content-type": f"multipart/form-data; boundary={boundary}"}
+-        )
++        status, payload = self._upload()
+         self.assertEqual(status, 200)
+         self.assertEqual(payload["id"], fixture.FILE_ID)
+ 
+-        message = json.dumps(
+-            {
+-                "messages": [{"content": [{"source": {"type": "file", "file_id": fixture.FILE_ID}}]}],
+-                "metadata": {"user_id": "cherry_topic_v1_test"},
+-            }
+-        ).encode()
+-        self.connection.request("POST", "/v1/messages", message, {"content-type": "application/json"})
++        self.connection.request(
++            "POST",
++            "/v1/messages",
++            json.dumps(_valid_message()).encode(),
++            {"content-type": "application/json", "x-api-key": fixture.EXPECTED_API_KEY},
++        )
+         response = self.connection.getresponse()
+         stream_body = response.read().decode()
+         self.assertEqual(response.status, 200)
+@@ -60,6 +56,7 @@ class ClewdrRuntimeFixtureTest(unittest.TestCase):
+         status, payload = self._request("GET", "/status")
+         self.assertEqual(status, 200)
+         self.assertEqual(payload["status"], "success")
++        self.assertEqual(payload["requests"], {"files": 1, "messages": 1, "sessions_reset": 0})
+ 
+     def test_rejects_duplicate_multipart_fields(self) -> None:
+         boundary = "clewdr-duplicate-boundary"
+@@ -68,11 +65,140 @@ class ClewdrRuntimeFixtureTest(unittest.TestCase):
+             ("extra", "extra.bin", fixture.EXPECTED_MIME, b"extra"),
+         ]
+         status, payload = self._request(
+-            "POST", "/v1/files", _multipart(boundary, parts), {"content-type": f"multipart/form-data; boundary={boundary}"}
++            "POST",
++            "/v1/files",
++            _multipart(boundary, parts),
++            {"content-type": f"multipart/form-data; boundary={boundary}", "x-api-key": fixture.EXPECTED_API_KEY},
+         )
+         self.assertEqual(status, 400)
+         self.assertIn("exactly one", payload["detail"])
+ 
++    def test_rejects_missing_or_wrong_api_key(self) -> None:
++        for api_key in (None, "wrong-key"):
++            with self.subTest(api_key=api_key):
++                headers = {} if api_key is None else {"x-api-key": api_key}
++                status, payload = self._upload(headers)
++                self.assertEqual(status, 400)
++                self.assertIn("x-api-key", payload["detail"])
++
++    def test_rejects_upload_with_wrong_filename_mime_or_bytes(self) -> None:
++        cases = [
++            (("file", "wrong.bin", fixture.EXPECTED_MIME, fixture.EXPECTED_BYTES), "filename"),
++            (("file", fixture.EXPECTED_FILENAME, "text/plain", fixture.EXPECTED_BYTES), "MIME"),
++            (("file", fixture.EXPECTED_FILENAME, fixture.EXPECTED_MIME, b"wrong"), "bytes"),
++        ]
++        for part, expected_detail in cases:
++            with self.subTest(expected_detail=expected_detail):
++                boundary = f"clewdr-invalid-{expected_detail}"
++                status, payload = self._request(
++                    "POST",
++                    "/v1/files",
++                    _multipart(boundary, [part]),
++                    {
++                        "content-type": f"multipart/form-data; boundary={boundary}",
++                        "x-api-key": fixture.EXPECTED_API_KEY,
++                    },
++                )
++                self.assertEqual(status, 400)
++                self.assertIn(expected_detail, payload["detail"])
++
++    def test_rejects_message_without_api_key(self) -> None:
++        self.assertEqual(self._upload()[0], 200)
++        status, response = self._request(
++            "POST",
++            "/v1/messages",
++            json.dumps(_valid_message()).encode(),
++            {"content-type": "application/json"},
++        )
++        self.assertEqual(status, 400)
++        self.assertIn("x-api-key", response["detail"])
++
++    def test_rejects_file_id_hidden_outside_a_document_source(self) -> None:
++        self.assertEqual(self._upload()[0], 200)
++        payload = _valid_message()
++        payload["messages"][0]["content"] = [
++            {"type": "text", "text": "nested", "metadata": {"type": "file", "file_id": fixture.FILE_ID}}
++        ]
++        status, response = self._post_message(payload)
++        self.assertEqual(status, 400)
++        self.assertIn("exact file source", response["detail"])
++
++    def test_rejects_base64_document_sources(self) -> None:
++        self.assertEqual(self._upload()[0], 200)
++        payload = _valid_message()
++        payload["messages"][0]["content"][1]["source"] = {
++            "type": "base64",
++            "media_type": fixture.EXPECTED_MIME,
++            "data": "Q0xFV0RS",
++        }
++        status, response = self._post_message(payload)
++        self.assertEqual(status, 400)
++        self.assertIn("base64", response["detail"])
++
++    def test_rejects_wrong_model_session_and_tool_fields(self) -> None:
++        self.assertEqual(self._upload()[0], 200)
++        cases = []
++        wrong_model = deepcopy(_valid_message())
++        wrong_model["model"] = "other-model"
++        cases.append((wrong_model, "model"))
++        wrong_session = deepcopy(_valid_message())
++        wrong_session["metadata"] = {"user_id": "cherry_topic_v1_short"}
++        cases.append((wrong_session, "session ID"))
++        with_tools = deepcopy(_valid_message())
++        with_tools["tools"] = [{"name": "unexpected"}]
++        cases.append((with_tools, "strip tools"))
++
++        for payload, expected_detail in cases:
++            with self.subTest(expected_detail=expected_detail):
++                status, response = self._post_message(payload)
++                self.assertEqual(status, 400)
++                self.assertIn(expected_detail, response["detail"])
++
++    def test_rejects_success_after_an_unexpected_session_reset(self) -> None:
++        self.assertEqual(self._upload()[0], 200)
++        self.assertEqual(self._post_message(_valid_message(), expect_stream=True)[0], 200)
++        reset = json.dumps({"session_id": _session_id()}).encode()
++        self.assertEqual(
++            self._request(
++                "POST",
++                "/v1/sessions/reset",
++                reset,
++                {"content-type": "application/json", "x-api-key": fixture.EXPECTED_API_KEY},
++            )[0],
++            200,
++        )
++        result = json.dumps(
++            {"status": "success", "answer": fixture.EXPECTED_ANSWER, "rawTypes": ["conversation_ready"]}
++        ).encode()
++        status, response = self._request("POST", "/result", result, {"content-type": "application/json"})
++        self.assertEqual(status, 400)
++        self.assertIn("sessions/reset=1", response["detail"])
++
++    def _upload(self, extra_headers: dict[str, str] | None = None) -> tuple[int, dict[str, object]]:
++        boundary = "clewdr-smoke-boundary"
++        upload = _multipart(boundary, [("file", fixture.EXPECTED_FILENAME, fixture.EXPECTED_MIME, fixture.EXPECTED_BYTES)])
++        headers = {"content-type": f"multipart/form-data; boundary={boundary}"}
++        if extra_headers is None:
++            headers["x-api-key"] = fixture.EXPECTED_API_KEY
++        else:
++            headers.update(extra_headers)
++        return self._request("POST", "/v1/files", upload, headers)
++
++    def _post_message(
++        self, payload: dict[str, object], expect_stream: bool = False
++    ) -> tuple[int, dict[str, object]]:
++        self.connection.request(
++            "POST",
++            "/v1/messages",
++            json.dumps(payload).encode(),
++            {"content-type": "application/json", "x-api-key": fixture.EXPECTED_API_KEY},
++        )
++        response = self.connection.getresponse()
++        body = response.read()
++        if expect_stream:
++            return response.status, {"stream": body.decode()}
++        return response.status, json.loads(body)
++
+     def _request(
+         self, method: str, path: str, body: bytes | None = None, headers: dict[str, str] | None = None
+     ) -> tuple[int, dict[str, object]]:
+@@ -93,5 +219,25 @@ def _multipart(boundary: str, parts: list[tuple[str, str, str, bytes]]) -> bytes
+     return bytes(body)
+ 
+ 
++def _session_id() -> str:
++    return "cherry_topic_v1_" + "a" * 64
++
++
++def _valid_message() -> dict[str, object]:
++    return {
++        "model": fixture.EXPECTED_MODEL,
++        "messages": [
++            {
++                "role": "user",
++                "content": [
++                    {"type": "text", "text": "Read the attached runtime smoke payload."},
++                    {"type": "document", "source": {"type": "file", "file_id": fixture.FILE_ID}},
++                ],
++            }
++        ],
++        "metadata": {"user_id": _session_id()},
++    }
++
++
+ if __name__ == "__main__":
+     unittest.main()
+diff --git a/src/aiCore/provider/__tests__/clewdrProvider.test.ts b/src/aiCore/provider/__tests__/clewdrProvider.test.ts
+index 420e490..8013c10 100644
+--- a/src/aiCore/provider/__tests__/clewdrProvider.test.ts
++++ b/src/aiCore/provider/__tests__/clewdrProvider.test.ts
+@@ -43,6 +43,10 @@ function stagedFile(id: string) {
+   }
+ }
+ 
++function clewdrError(type: string, message = 'Clewdr session state expired') {
++  return { type: 'error', error: { type, message } }
++}
++
+ function messagesBody(overrides: JsonObject = {}): JsonObject {
+   return {
+     model: 'claude-test',
+@@ -74,11 +78,11 @@ function messagesBody(overrides: JsonObject = {}): JsonObject {
+ function makeFetch(options: { messageResponses?: Response[]; messageStatuses?: number[]; uploadIds?: string[] } = {}) {
+   const messageResponses = [...(options.messageResponses ?? [])]
+   const messageStatuses = [...(options.messageStatuses ?? [200])]
+-  const uploadIds = [...(options.uploadIds ?? ['file_clewdr_document', 'file_clewdr_image'])]
++  const uploadIds = [...(options.uploadIds ?? ['file_clewdr_v1_document', 'file_clewdr_v1_image'])]
+   return jest.fn(async (input: FetchInput, _init?: FetchInit) => {
+     const url = String(input)
+     if (url.endsWith('/files')) {
+-      return jsonResponse(stagedFile(uploadIds.shift() ?? 'file_clewdr_extra'))
++      return jsonResponse(stagedFile(uploadIds.shift() ?? 'file_clewdr_v1_extra'))
+     }
+     if (url.endsWith('/sessions/reset')) {
+       return jsonResponse({ ok: true })
+@@ -158,10 +162,10 @@ describe('Clewdr provider fetch', () => {
+           { type: 'text', text: 'inspect these files' },
+           {
+             type: 'document',
+-            source: { type: 'file', file_id: 'file_clewdr_document' },
++            source: { type: 'file', file_id: 'file_clewdr_v1_document' },
+             title: 'folder\\payload.bin'
+           },
+-          { type: 'image', source: { type: 'file', file_id: 'file_clewdr_image' } }
++          { type: 'image', source: { type: 'file', file_id: 'file_clewdr_v1_image' } }
+         ]
+       },
+       { role: 'assistant', content: [{ type: 'text', text: 'prior assistant context' }] }
+@@ -177,7 +181,7 @@ describe('Clewdr provider fetch', () => {
+   })
+ 
+   it('deduplicates concurrent and completed uploads for the same session', async () => {
+-    const baseFetch = makeFetch({ uploadIds: ['file_clewdr_shared'] })
++    const baseFetch = makeFetch({ uploadIds: ['file_clewdr_v1_shared'] })
+     const clewdrFetch = createTestFetch(baseFetch as typeof fetch, 'topic-deduplicate')
+     const body = messagesBody({
+       messages: [
+@@ -203,12 +207,12 @@ describe('Clewdr provider fetch', () => {
+     expect(uploadCalls(baseFetch)).toHaveLength(1)
+     for (const [, init] of messageCalls(baseFetch)) {
+       const sent = JSON.parse(init.body as string)
+-      expect(sent.messages[0].content[0].source).toEqual({ type: 'file', file_id: 'file_clewdr_shared' })
++      expect(sent.messages[0].content[0].source).toEqual({ type: 'file', file_id: 'file_clewdr_v1_shared' })
+     }
+   })
+ 
+   it('deduplicates completed uploads across provider fetch instances', async () => {
+-    const baseFetch = makeFetch({ uploadIds: ['file_clewdr_cross_instance'] })
++    const baseFetch = makeFetch({ uploadIds: ['file_clewdr_v1_cross_instance'] })
+     const firstFetch = createTestFetch(baseFetch as typeof fetch, 'topic-cross-instance')
+     const secondFetch = createTestFetch(baseFetch as typeof fetch, 'topic-cross-instance')
+     const body = messagesBody({
+@@ -233,7 +237,9 @@ describe('Clewdr provider fetch', () => {
+   })
+ 
+   it('isolates the upload cache by endpoint, session, and principal', async () => {
+-    const baseFetch = makeFetch({ uploadIds: ['file_a', 'file_b', 'file_c', 'file_d'] })
++    const baseFetch = makeFetch({
++      uploadIds: ['file_clewdr_v1_a', 'file_clewdr_v1_b', 'file_clewdr_v1_c', 'file_clewdr_v1_d']
++    })
+     const body = messagesBody({
+       messages: [
+         {
+@@ -287,8 +293,8 @@ describe('Clewdr provider fetch', () => {
+   it('does not cache failed or invalid uploads', async () => {
+     const baseFetch = jest
+       .fn()
+-      .mockResolvedValueOnce(jsonResponse({ unexpected: true }))
+-      .mockResolvedValueOnce(jsonResponse(stagedFile('file_clewdr_valid')))
++      .mockResolvedValueOnce(jsonResponse(stagedFile('file_clewdr_legacy')))
++      .mockResolvedValueOnce(jsonResponse(stagedFile('file_clewdr_v1_valid')))
+       .mockResolvedValue(messageResponse())
+     const clewdrFetch = createTestFetch(baseFetch as typeof fetch, 'topic-invalid-upload')
+     const body = messagesBody({
+@@ -330,8 +336,8 @@ describe('Clewdr provider fetch', () => {
+ 
+   it('resets once for conversation_expired and retries the staged body without uploading again', async () => {
+     const baseFetch = makeFetch({
+-      messageResponses: [jsonResponse({ code: 'conversation_expired' }, 410), messageResponse()],
+-      uploadIds: ['file_clewdr_reused']
++      messageResponses: [jsonResponse(clewdrError('conversation_expired'), 410), messageResponse()],
++      uploadIds: ['file_clewdr_v1_reused']
+     })
+     const body = messagesBody({
+       messages: [
+@@ -367,8 +373,8 @@ describe('Clewdr provider fetch', () => {
+ 
+   it('evicts expired file IDs, uploads preserved base64 again, and retries without resetting the conversation', async () => {
+     const baseFetch = makeFetch({
+-      messageResponses: [jsonResponse({ code: 'file_expired' }, 410), messageResponse()],
+-      uploadIds: ['file_clewdr_stale', 'file_clewdr_fresh']
++      messageResponses: [jsonResponse(clewdrError('file_expired'), 410), messageResponse()],
++      uploadIds: ['file_clewdr_v1_stale', 'file_clewdr_v1_fresh']
+     })
+     const body = messagesBody({
+       messages: [
+@@ -395,13 +401,13 @@ describe('Clewdr provider fetch', () => {
+     expect(messageCalls(baseFetch)).toHaveLength(2)
+     const firstBody = JSON.parse(messageCalls(baseFetch)[0][1].body as string)
+     const secondBody = JSON.parse(messageCalls(baseFetch)[1][1].body as string)
+-    expect(firstBody.messages[0].content[0].source.file_id).toBe('file_clewdr_stale')
+-    expect(secondBody.messages[0].content[0].source.file_id).toBe('file_clewdr_fresh')
++    expect(firstBody.messages[0].content[0].source.file_id).toBe('file_clewdr_v1_stale')
++    expect(secondBody.messages[0].content[0].source.file_id).toBe('file_clewdr_v1_fresh')
+     expect(baseFetch.mock.calls.some(([input]) => String(input).endsWith('/sessions/reset'))).toBe(false)
+   })
+ 
+   it('propagates unclassified 410 responses without reset or retry', async () => {
+-    const baseFetch = makeFetch({ messageResponses: [jsonResponse({ code: 'other_expired' }, 410)] })
++    const baseFetch = makeFetch({ messageResponses: [jsonResponse(clewdrError('other_expired'), 410)] })
+     const response = await createTestFetch(baseFetch as typeof fetch, 'topic-unclassified-410')(
+       `${endpoint}/messages`,
+       {
+@@ -415,6 +421,18 @@ describe('Clewdr provider fetch', () => {
+     expect(baseFetch.mock.calls.some(([input]) => String(input).endsWith('/sessions/reset'))).toBe(false)
+   })
+ 
++  it('does not interpret the legacy top-level code field as a protocol error envelope', async () => {
++    const baseFetch = makeFetch({ messageResponses: [jsonResponse({ code: 'conversation_expired' }, 410)] })
++    const response = await createTestFetch(baseFetch as typeof fetch, 'topic-legacy-410')(`${endpoint}/messages`, {
++      method: 'POST',
++      body: JSON.stringify(messagesBody({ messages: [] }))
++    })
++
++    expect(response.status).toBe(410)
++    expect(messageCalls(baseFetch)).toHaveLength(1)
++    expect(baseFetch.mock.calls.some(([input]) => String(input).endsWith('/sessions/reset'))).toBe(false)
++  })
++
+   it('passes through non-message requests without cloning the request options', async () => {
+     const baseFetch = makeFetch()
+     const init: NonNullable<FetchInit> = { method: 'GET', headers: { accept: 'application/json' } }
+diff --git a/src/aiCore/provider/clewdrProvider.ts b/src/aiCore/provider/clewdrProvider.ts
+index 7262cdb..1fdc4c8 100644
+--- a/src/aiCore/provider/clewdrProvider.ts
++++ b/src/aiCore/provider/clewdrProvider.ts
+@@ -6,6 +6,7 @@ import { storage, uuid } from '@/utils'
+ const CLEWDR_CLIENT_ID_KEY = 'clewdr.installation_client_id'
+ const CLEWDR_SESSION_PREFIX = 'cherry_topic_v1_'
+ const CLEWDR_SESSION_DOMAIN = 'clewdr-cherry-session-v1'
++const CLEWDR_FILE_ID_PREFIX = 'file_clewdr_v1_'
+ const MAX_UPLOAD_CACHE_ENTRIES = 1024
+ 
+ type FetchFunction = typeof globalThis.fetch
+@@ -125,8 +126,8 @@ export function createClewdrFetch(settings: ClewdrFetchSettings): FetchFunction
+     const response = await settings.fetch(input, rewrittenInit)
+     if (response.status !== 410) return response
+ 
+-    const errorCode = await readClewdrErrorCode(response)
+-    if (errorCode === 'file_expired') {
++    const errorType = await readClewdrErrorType(response)
++    if (errorType === 'file_expired') {
+       if (response.body) await response.body.cancel().catch(() => undefined)
+       for (const cacheKey of rewrittenCacheKeys) uploadCache.delete(cacheKey)
+ 
+@@ -136,7 +137,7 @@ export function createClewdrFetch(settings: ClewdrFetchSettings): FetchFunction
+       prepareSessionBody(retryParsed, wireSessionId)
+       return settings.fetch(input, { ...rewrittenInit, body: JSON.stringify(retryParsed) })
+     }
+-    if (errorCode !== 'conversation_expired') return response
++    if (errorType !== 'conversation_expired') return response
+ 
+     if (response.body) await response.body.cancel().catch(() => undefined)
+     const resetHeaders = new Headers(messageHeaders)
+@@ -299,10 +300,11 @@ function reserveUploadCacheEntry(): void {
+   uploadCache.delete(settled[0])
+ }
+ 
+-async function readClewdrErrorCode(response: Response): Promise<string | undefined> {
++async function readClewdrErrorType(response: Response): Promise<string | undefined> {
+   try {
+     const payload: unknown = await response.clone().json()
+-    return isJsonObject(payload) && typeof payload.code === 'string' ? payload.code : undefined
++    if (!isJsonObject(payload) || payload.type !== 'error' || !isJsonObject(payload.error)) return undefined
++    return typeof payload.error.type === 'string' ? payload.error.type : undefined
+   } catch {
+     return undefined
+   }
+@@ -325,6 +327,7 @@ function isStagedFileResponse(value: unknown): value is StagedFileResponse {
+   return (
+     isJsonObject(value) &&
+     typeof value.id === 'string' &&
++    value.id.startsWith(CLEWDR_FILE_ID_PREFIX) &&
+     value.type === 'file' &&
+     typeof value.filename === 'string' &&
+     typeof value.mime_type === 'string' &&
