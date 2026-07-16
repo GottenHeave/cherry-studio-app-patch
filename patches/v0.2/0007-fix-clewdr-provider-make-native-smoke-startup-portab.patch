@@ -1,0 +1,117 @@
+From adc62f61a4ec00389d33217f172bab383b19bee0 Mon Sep 17 00:00:00 2001
+From: GottenHeave <274621501+GottenHeave@users.noreply.github.com>
+Date: Thu, 16 Jul 2026 19:38:33 +0000
+Subject: [PATCH] fix(clewdr-provider): make native smoke startup portable
+
+Signed-off-by: GottenHeave <274621501+GottenHeave@users.noreply.github.com>
+---
+ scripts/ci/clewdr-runtime-smoke.sh            | 24 +++++++++++++--
+ .../__tests__/clewdrRuntimeSmoke.test.ts      | 30 +++++++++++++++++++
+ 2 files changed, 51 insertions(+), 3 deletions(-)
+
+diff --git a/scripts/ci/clewdr-runtime-smoke.sh b/scripts/ci/clewdr-runtime-smoke.sh
+index 1d2de2f..a907cc7 100755
+--- a/scripts/ci/clewdr-runtime-smoke.sh
++++ b/scripts/ci/clewdr-runtime-smoke.sh
+@@ -7,6 +7,11 @@ if [[ "$platform" != "android" && "$platform" != "ios" ]]; then
+   echo "usage: $0 android|ios" >&2
+   exit 2
+ fi
++if [[ "$platform" == "android" ]]; then
++  fixture_host="0.0.0.0"
++else
++  fixture_host="127.0.0.1"
++fi
+ 
+ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ fixture="$repo_root/scripts/ci/clewdr_runtime_fixture.py"
+@@ -55,10 +60,10 @@ fi
+ 
+ cd "$repo_root"
+ python3 -m unittest scripts/ci/test_clewdr_runtime_fixture.py
+-python3 "$fixture" --port 0 --port-file "$port_file" >"$fixture_log" 2>&1 &
++python3 "$fixture" --host "$fixture_host" --port 0 --port-file "$port_file" >"$fixture_log" 2>&1 &
+ fixture_pid=$!
+ 
+-for ((attempt = 0; attempt < 50; attempt++)); do
++for ((attempt = 0; attempt < 300; attempt++)); do
+   [[ -s "$port_file" ]] && break
+   kill -0 "$fixture_pid" 2>/dev/null || {
+     cat "$fixture_log" >&2
+@@ -68,6 +73,13 @@ for ((attempt = 0; attempt < 50; attempt++)); do
+ done
+ if [[ ! -s "$port_file" ]]; then
+   echo "fixture did not publish its port" >&2
++  cat "$fixture_log" >&2
++  if kill -0 "$fixture_pid" 2>/dev/null; then
++    echo "fixture process is still running: pid=$fixture_pid" >&2
++    ps -p "$fixture_pid" -o pid=,stat=,command= >&2 || true
++  else
++    echo "fixture process exited before the timeout diagnostic: pid=$fixture_pid" >&2
++  fi
+   exit 1
+ fi
+ port="$(cat "$port_file")"
+@@ -91,6 +103,12 @@ if [[ "$platform" == "android" ]]; then
+     echo "Android device is not ready: $device" >&2
+     exit 1
+   fi
++  export ANDROID_SERIAL="$device"
++  avd_name="$(adb -s "$device" emu avd name 2>/dev/null | awk 'NR == 1 { sub(/\r$/, ""); print; exit }' || true)"
++  expo_device_args=()
++  if [[ -n "$avd_name" && "$avd_name" != "OK" && "$avd_name" != KO:* ]]; then
++    expo_device_args=(--device "$avd_name")
++  fi
+   abi="$(adb -s "$device" shell getprop ro.product.cpu.abi | tr -d '\r')"
+   case "$abi" in
+     arm64-v8a | x86_64 | x86) ;;
+@@ -108,7 +126,7 @@ if [[ "$platform" == "android" ]]; then
+   fi
+   rm -f android/gradle.properties.bak
+   EXPO_PUBLIC_CLEWDR_RUNTIME_SMOKE=1 CI=1 pnpm exec expo run:android \
+-    --variant release --no-bundler --device "$device" 2>&1 | tee "$build_log"
++    --variant release --no-bundler "${expo_device_args[@]}" 2>&1 | tee "$build_log"
+ else
+   command -v xcrun >/dev/null || {
+     echo "xcrun is required for iOS runtime smoke" >&2
+diff --git a/src/ai/runtime/__tests__/clewdrRuntimeSmoke.test.ts b/src/ai/runtime/__tests__/clewdrRuntimeSmoke.test.ts
+index 490a3a9..eb72a49 100644
+--- a/src/ai/runtime/__tests__/clewdrRuntimeSmoke.test.ts
++++ b/src/ai/runtime/__tests__/clewdrRuntimeSmoke.test.ts
+@@ -24,6 +24,36 @@ describe('Clewdr runtime smoke URL', () => {
+     ).toEqual({ endpoint: 'http://localhost:18484' });
+   });
+ 
++  it('starts the fixture with platform-specific bindings and startup diagnostics', () => {
++    const script = readFileSync(join(process.cwd(), 'scripts/ci/clewdr-runtime-smoke.sh'), 'utf8');
++
++    expect(script).toContain('fixture_host="0.0.0.0"');
++    expect(script).toContain('fixture_host="127.0.0.1"');
++    expect(script).toContain('python3 "$fixture" --host "$fixture_host" --port 0');
++    expect(script).toContain('attempt < 300');
++    expect(script).toContain('kill -0 "$fixture_pid" 2>/dev/null || {');
++    expect(script).toContain(
++      [
++        'if [[ ! -s "$port_file" ]]; then',
++        '  echo "fixture did not publish its port" >&2',
++        '  cat "$fixture_log" >&2',
++      ].join('\n'),
++    );
++    expect(script).toContain('ps -p "$fixture_pid" -o pid=,stat=,command=');
++  });
++
++  it('keeps the Android serial separate from the Expo AVD name', () => {
++    const script = readFileSync(join(process.cwd(), 'scripts/ci/clewdr-runtime-smoke.sh'), 'utf8');
++    const shellExpoArgsReference = '$' + '{expo_device_args[@]}';
++
++    expect(script).toContain('export ANDROID_SERIAL="$device"');
++    expect(script).toContain('adb -s "$device" emu avd name');
++    expect(script).toContain('"$avd_name" != KO:*');
++    expect(script).toContain('expo_device_args=(--device "$avd_name")');
++    expect(script).toContain(`"${shellExpoArgsReference}"`);
++    expect(script.match(/--device "\$device"/g)).toHaveLength(1);
++  });
++
+   it('accepts only the exact smoke deep link with an HTTP endpoint', () => {
+     expect(
+       parseClewdrRuntimeSmokeUrl(

@@ -1,0 +1,135 @@
+From 9fb24451a52cfc94d397769a7bfaa7081787c18f Mon Sep 17 00:00:00 2001
+From: GottenHeave <274621501+GottenHeave@users.noreply.github.com>
+Date: Thu, 16 Jul 2026 19:36:46 +0000
+Subject: [PATCH] ci(clewdr): harden native smoke startup
+
+Signed-off-by: GottenHeave <274621501+GottenHeave@users.noreply.github.com>
+---
+ scripts/ci/clewdr-runtime-smoke.sh        | 29 ++++++++++++++++++++---
+ scripts/ci/test_clewdr_runtime_fixture.py | 29 +++++++++++++++++++++++
+ 2 files changed, 55 insertions(+), 3 deletions(-)
+
+diff --git a/scripts/ci/clewdr-runtime-smoke.sh b/scripts/ci/clewdr-runtime-smoke.sh
+index 615d454..943be41 100755
+--- a/scripts/ci/clewdr-runtime-smoke.sh
++++ b/scripts/ci/clewdr-runtime-smoke.sh
+@@ -7,6 +7,11 @@ if [[ "$platform" != "android" && "$platform" != "ios" ]]; then
+   echo "usage: $0 android|ios" >&2
+   exit 2
+ fi
++if [[ "$platform" == "android" ]]; then
++  fixture_host="0.0.0.0"
++else
++  fixture_host="127.0.0.1"
++fi
+ 
+ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ fixture="$repo_root/scripts/ci/clewdr_runtime_fixture.py"
+@@ -34,6 +39,16 @@ dump_native_logs() {
+   fi
+ }
+ 
++dump_fixture_startup_state() {
++  cat "$fixture_log" >&2
++  if kill -0 "$fixture_pid" 2>/dev/null; then
++    echo "fixture process status: running (kill -0 succeeded)" >&2
++  else
++    echo "fixture process status: exited (kill -0 failed)" >&2
++  fi
++  ps -p "$fixture_pid" -o pid=,stat=,command= >&2 || true
++}
++
+ for command_name in python3 pnpm curl; do
+   if ! command -v "$command_name" >/dev/null; then
+     echo "required command not found: $command_name" >&2
+@@ -43,10 +58,10 @@ done
+ 
+ cd "$repo_root"
+ python3 -m unittest scripts/ci/test_clewdr_runtime_fixture.py
+-python3 "$fixture" --port 0 --port-file "$port_file" >"$fixture_log" 2>&1 &
++python3 "$fixture" --host "$fixture_host" --port 0 --port-file "$port_file" >"$fixture_log" 2>&1 &
+ fixture_pid=$!
+ 
+-for ((attempt = 0; attempt < 50; attempt++)); do
++for ((attempt = 0; attempt < 300; attempt++)); do
+   [[ -s "$port_file" ]] && break
+   kill -0 "$fixture_pid" 2>/dev/null || {
+     cat "$fixture_log" >&2
+@@ -56,6 +71,7 @@ for ((attempt = 0; attempt < 50; attempt++)); do
+ done
+ if [[ ! -s "$port_file" ]]; then
+   echo "fixture did not publish its port" >&2
++  dump_fixture_startup_state
+   exit 1
+ fi
+ port="$(cat "$port_file")"
+@@ -79,6 +95,13 @@ if [[ "$platform" == "android" ]]; then
+     echo "Android device is not ready: $device" >&2
+     exit 1
+   fi
++  export ANDROID_SERIAL="$device"
++  avd_output="$(adb -s "$device" emu avd name 2>/dev/null || true)"
++  avd_name="$(printf '%s\n' "$avd_output" | tr -d '\r' | awk 'NF && $0 != "OK" && $0 !~ /^(KO:|error:)/ { print; exit }')"
++  android_device_args=()
++  if [[ -n "$avd_name" ]]; then
++    android_device_args=(--device "$avd_name")
++  fi
+   abi="$(adb -s "$device" shell getprop ro.product.cpu.abi | tr -d '\r')"
+   case "$abi" in
+     arm64-v8a | x86_64 | x86) ;;
+@@ -96,7 +119,7 @@ if [[ "$platform" == "android" ]]; then
+   fi
+   rm -f android/gradle.properties.bak
+   EXPO_PUBLIC_CLEWDR_RUNTIME_SMOKE=1 CI=1 pnpm exec expo run:android \
+-    --variant release --no-bundler --device "$device" 2>&1 | tee "$build_log"
++    --variant release --no-bundler "${android_device_args[@]}" 2>&1 | tee "$build_log"
+ else
+   command -v xcrun >/dev/null || {
+     echo "xcrun is required for iOS runtime smoke" >&2
+diff --git a/scripts/ci/test_clewdr_runtime_fixture.py b/scripts/ci/test_clewdr_runtime_fixture.py
+index 06978ef..beff993 100755
+--- a/scripts/ci/test_clewdr_runtime_fixture.py
++++ b/scripts/ci/test_clewdr_runtime_fixture.py
+@@ -11,6 +11,7 @@ from copy import deepcopy
+ from pathlib import Path
+ 
+ FIXTURE_PATH = Path(__file__).with_name("clewdr_runtime_fixture.py")
++HARNESS_PATH = Path(__file__).with_name("clewdr-runtime-smoke.sh")
+ SPEC = importlib.util.spec_from_file_location("clewdr_runtime_fixture", FIXTURE_PATH)
+ assert SPEC and SPEC.loader
+ fixture = importlib.util.module_from_spec(SPEC)
+@@ -58,6 +59,34 @@ class ClewdrRuntimeFixtureTest(unittest.TestCase):
+         self.assertEqual(payload["status"], "success")
+         self.assertEqual(payload["requests"], {"files": 1, "messages": 1, "sessions_reset": 0})
+ 
++    def test_shell_contract_has_platform_hosts_and_startup_diagnostics(self) -> None:
++        script = HARNESS_PATH.read_text(encoding="utf-8")
++        fixture_start = script.index('python3 "$fixture"')
++        self.assertLess(script.index('fixture_host="0.0.0.0"'), fixture_start)
++        self.assertLess(script.index('fixture_host="127.0.0.1"'), fixture_start)
++        self.assertIn('--host "$fixture_host"', script)
++        self.assertIn("attempt < 300", script)
++        self.assertIn('cat "$fixture_log" >&2', script)
++        self.assertIn('kill -0 "$fixture_pid"', script)
++        self.assertIn('ps -p "$fixture_pid" -o pid=,stat=,command=', script)
++        self.assertIn('export ANDROID_SERIAL="$device"', script)
++        self.assertIn('adb -s "$device" emu avd name', script)
++        self.assertIn('android_device_args=(--device "$avd_name")', script)
++        self.assertIn('"${android_device_args[@]}"', script)
++        self.assertNotIn('--variant release --no-bundler --device "$device"', script)
++        self.assertIn(
++            'kill -0 "$fixture_pid" 2>/dev/null || {\n    cat "$fixture_log" >&2\n    exit 1\n  }',
++            script,
++        )
++        self.assertIn(
++            'if [[ ! -s "$port_file" ]]; then\n'
++            '  echo "fixture did not publish its port" >&2\n'
++            "  dump_fixture_startup_state\n"
++            "  exit 1\n"
++            "fi",
++            script,
++        )
++
+     def test_rejects_duplicate_multipart_fields(self) -> None:
+         boundary = "clewdr-duplicate-boundary"
+         parts = [
