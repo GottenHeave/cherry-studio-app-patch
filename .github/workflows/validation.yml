@@ -1,0 +1,33 @@
+name: Patch validation
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - patches/**
+      - scripts/**
+      - .github/workflows/**
+  push:
+    branches:
+      - main
+      - patchset
+    paths:
+      - patches/**
+      - scripts/**
+      - .github/workflows/**
+
+permissions:
+  contents: read
+
+jobs:
+  main:
+    name: main patch line
+    uses: ./.github/workflows/_validate-line.yml
+    with:
+      line: main
+
+  v0-2:
+    name: v0.2 patch line
+    uses: ./.github/workflows/_validate-line.yml
+    with:
+      line: v0.2

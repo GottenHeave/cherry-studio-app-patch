@@ -1,0 +1,256 @@
+name: Release patch line
+
+on:
+  workflow_call:
+    inputs:
+      line:
+        description: Upstream branch and patch line
+        required: true
+        type: string
+      release-enabled:
+        description: Whether EAS releases are enabled
+        required: true
+        type: boolean
+      eas-project-id:
+        description: Patch repository EAS project ID
+        required: false
+        type: string
+    secrets:
+      EXPO_TOKEN:
+        required: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: patch-release-${{ inputs.line }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    uses: ./.github/workflows/_validate-line.yml
+    with:
+      line: ${{ inputs.line }}
+
+  preflight:
+    name: Prepare ${{ inputs.line }} release
+    needs: validate
+    runs-on: ubuntu-latest
+    outputs:
+      ready: ${{ steps.preflight.outputs.ready }}
+      tag: ${{ steps.version.outputs.tag }}
+      pnpm: ${{ steps.version.outputs.pnpm }}
+    steps:
+      - name: Check out patch repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Check release configuration
+        id: preflight
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          EAS_PROJECT_ID: ${{ inputs.eas-project-id }}
+          RELEASE_ENABLED: ${{ inputs.release-enabled }}
+        shell: bash
+        run: |
+          if [[ "$RELEASE_ENABLED" != 'true' ]]; then
+            echo 'ready=false' >> "$GITHUB_OUTPUT"
+            echo '## EAS release skipped' >> "$GITHUB_STEP_SUMMARY"
+            echo 'Set the repository variable `EAS_RELEASE_ENABLED=true` to enable mobile releases.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          [[ -n "$EXPO_TOKEN" ]] || { echo 'EXPO_TOKEN secret is required when EAS releases are enabled.' >&2; exit 1; }
+          [[ -n "$EAS_PROJECT_ID" ]] || { echo 'EAS_PROJECT_ID variable is required when EAS releases are enabled.' >&2; exit 1; }
+          echo 'ready=true' >> "$GITHUB_OUTPUT"
+
+      - name: Replay patches and calculate next tag
+        if: steps.preflight.outputs.ready == 'true'
+        id: version
+        shell: bash
+        run: |
+          ./scripts/apply-patches.sh "${{ inputs.line }}" "$RUNNER_TEMP/source"
+          case "${{ inputs.line }}" in
+            main)
+              version="$(node -p "require('$RUNNER_TEMP/source/package.json').version")"
+              prefix="v${version}-patch"
+              echo 'pnpm=10.26.2' >> "$GITHUB_OUTPUT"
+              ;;
+            v0.2)
+              prefix='v0.2-patch'
+              echo 'pnpm=11.8.0' >> "$GITHUB_OUTPUT"
+              ;;
+            *) exit 2 ;;
+          esac
+          highest="$(git tag -l "${prefix}.*" | sed -n 's/^.*\.\([0-9][0-9]*\)$/\1/p' | sort -n | tail -1)"
+          echo "tag=${prefix}.$(( ${highest:-0} + 1 ))" >> "$GITHUB_OUTPUT"
+
+  build-android:
+    name: EAS Android (${{ inputs.line }})
+    needs: preflight
+    if: needs.preflight.outputs.ready == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    outputs:
+      build-id: ${{ steps.build.outputs.build-id }}
+    steps:
+      - name: Check out patch repository
+        uses: actions/checkout@v7
+      - name: Replay complete patch series
+        run: ./scripts/apply-patches.sh "${{ inputs.line }}" "$RUNNER_TEMP/source"
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: ${{ needs.preflight.outputs.pnpm }}
+      - name: Install Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: ${{ runner.temp }}/source/pnpm-lock.yaml
+      - name: Set up EAS
+        uses: expo/expo-github-action@v9
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+          packager: pnpm
+      - name: Install dependencies
+        working-directory: ${{ runner.temp }}/source
+        run: pnpm install --frozen-lockfile
+      - name: Bind patch repository EAS project
+        env:
+          EAS_PROJECT_ID: ${{ inputs.eas-project-id }}
+        run: ./scripts/configure-eas-project.sh "$RUNNER_TEMP/source" "$EAS_PROJECT_ID"
+      - name: Start Android build
+        id: build
+        working-directory: ${{ runner.temp }}/source
+        shell: bash
+        run: |
+          pnpm exec eas build --platform android --profile production --non-interactive --no-wait --json > "$RUNNER_TEMP/build.json"
+          build_id="$(jq -er '.[0].id' "$RUNNER_TEMP/build.json")"
+          echo "build-id=$build_id" >> "$GITHUB_OUTPUT"
+      - name: Wait for Android and download APK
+        working-directory: ${{ runner.temp }}/source
+        env:
+          BUILD_ID: ${{ steps.build.outputs.build-id }}
+          RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+        shell: bash
+        run: |
+          while :; do
+            pnpm exec eas build:view "$BUILD_ID" --json > "$RUNNER_TEMP/status.json"
+            status="$(jq -r '.status | ascii_downcase' "$RUNNER_TEMP/status.json")"
+            case "$status" in
+              finished) break ;;
+              errored | canceled) echo "Android EAS build ended with status: $status" >&2; exit 1 ;;
+              *) echo "Android build status: $status"; sleep 60 ;;
+            esac
+          done
+          url="$(jq -er '.artifacts.buildUrl' "$RUNNER_TEMP/status.json")"
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/CherryStudio-${RELEASE_TAG}.apk" "$url"
+      - name: Upload APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-${{ inputs.line }}
+          path: ${{ runner.temp }}/CherryStudio-${{ needs.preflight.outputs.tag }}.apk
+          if-no-files-found: error
+
+  build-ios:
+    name: EAS iOS (${{ inputs.line }})
+    needs: preflight
+    if: needs.preflight.outputs.ready == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    outputs:
+      build-id: ${{ steps.build.outputs.build-id }}
+    steps:
+      - name: Check out patch repository
+        uses: actions/checkout@v7
+      - name: Replay complete patch series
+        run: ./scripts/apply-patches.sh "${{ inputs.line }}" "$RUNNER_TEMP/source"
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: ${{ needs.preflight.outputs.pnpm }}
+      - name: Install Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: ${{ runner.temp }}/source/pnpm-lock.yaml
+      - name: Set up EAS
+        uses: expo/expo-github-action@v9
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+          packager: pnpm
+      - name: Install dependencies
+        working-directory: ${{ runner.temp }}/source
+        run: pnpm install --frozen-lockfile
+      - name: Bind patch repository EAS project
+        env:
+          EAS_PROJECT_ID: ${{ inputs.eas-project-id }}
+        run: ./scripts/configure-eas-project.sh "$RUNNER_TEMP/source" "$EAS_PROJECT_ID"
+      - name: Start iOS build without submission
+        id: build
+        working-directory: ${{ runner.temp }}/source
+        shell: bash
+        run: |
+          pnpm exec eas build --platform ios --profile production --non-interactive --no-wait --json > "$RUNNER_TEMP/build.json"
+          build_id="$(jq -er '.[0].id' "$RUNNER_TEMP/build.json")"
+          echo "build-id=$build_id" >> "$GITHUB_OUTPUT"
+      - name: Wait for iOS and download IPA
+        working-directory: ${{ runner.temp }}/source
+        env:
+          BUILD_ID: ${{ steps.build.outputs.build-id }}
+          RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+        shell: bash
+        run: |
+          while :; do
+            pnpm exec eas build:view "$BUILD_ID" --json > "$RUNNER_TEMP/status.json"
+            status="$(jq -r '.status | ascii_downcase' "$RUNNER_TEMP/status.json")"
+            case "$status" in
+              finished) break ;;
+              errored | canceled) echo "iOS EAS build ended with status: $status" >&2; exit 1 ;;
+              *) echo "iOS build status: $status"; sleep 60 ;;
+            esac
+          done
+          url="$(jq -er '.artifacts.buildUrl' "$RUNNER_TEMP/status.json")"
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/CherryStudio-${RELEASE_TAG}.ipa" "$url"
+      - name: Upload IPA
+        uses: actions/upload-artifact@v7
+        with:
+          name: ios-${{ inputs.line }}
+          path: ${{ runner.temp }}/CherryStudio-${{ needs.preflight.outputs.tag }}.ipa
+          if-no-files-found: error
+
+  publish:
+    name: Publish ${{ inputs.line }} release
+    needs: [preflight, build-android, build-ios]
+    if: needs.preflight.outputs.ready == 'true' && needs.build-android.result == 'success' && needs.build-ios.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Android artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: android-${{ inputs.line }}
+          path: artifacts
+      - name: Download iOS artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: ios-${{ inputs.line }}
+          path: artifacts
+      - name: Create GitHub release once
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.preflight.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: Cherry Studio ${{ needs.preflight.outputs.tag }}
+          generate_release_notes: true
+          body: |
+            Clewdr patch line: `${{ inputs.line }}`
+            Upstream branch: `CherryHQ/cherry-studio-app@${{ inputs.line }}`
+            Android EAS build: `${{ needs.build-android.outputs.build-id }}`
+            iOS EAS build: `${{ needs.build-ios.outputs.build-id }}`
+
+            These builds were not submitted to an app store.
+          files: artifacts/*

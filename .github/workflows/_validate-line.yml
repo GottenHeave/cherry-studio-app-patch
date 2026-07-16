@@ -1,0 +1,125 @@
+name: Validate patch line
+
+on:
+  workflow_call:
+    inputs:
+      line:
+        description: Upstream branch and patch line
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate ${{ inputs.line }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CI: 'true'
+      PRCI: 'true'
+    steps:
+      - name: Check out patch repository
+        uses: actions/checkout@v7
+
+      - name: Select toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          case "${{ inputs.line }}" in
+            main) echo 'pnpm=10.26.2' >> "$GITHUB_OUTPUT" ;;
+            v0.2) echo 'pnpm=11.8.0' >> "$GITHUB_OUTPUT" ;;
+            *) echo 'Unsupported patch line: ${{ inputs.line }}' >&2; exit 2 ;;
+          esac
+
+      - name: Replay complete patch series
+        run: ./scripts/apply-patches.sh "${{ inputs.line }}" "$RUNNER_TEMP/source"
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: ${{ steps.toolchain.outputs.pnpm }}
+
+      - name: Install Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: ${{ runner.temp }}/source/pnpm-lock.yaml
+
+      - name: Install dependencies
+        working-directory: ${{ runner.temp }}/source
+        run: pnpm install --frozen-lockfile
+
+      - name: Run focused Clewdr tests
+        working-directory: ${{ runner.temp }}/source
+        shell: bash
+        run: |
+          mapfile -d '' tests < <(
+            find . -type f \( -iname '*clewdr*.test.ts' -o -iname '*clewdr*.test.tsx' -o -iname '*clewdr*.spec.ts' -o -iname '*clewdr*.spec.tsx' \) \
+              -not -path './node_modules/*' -print0 | sort -z
+          )
+          if (( ${#tests[@]} == 0 )); then
+            echo 'No focused Clewdr tests were found in the replayed source.' >&2
+            exit 1
+          fi
+          pnpm exec jest --runInBand --runTestsByPath "${tests[@]}"
+
+      - name: Build workspace packages
+        working-directory: ${{ runner.temp }}/source
+        run: pnpm -r --if-present run build
+
+      - name: Run workspace checks
+        working-directory: ${{ runner.temp }}/source
+        run: pnpm -r --if-present run check
+
+      - name: Lint
+        working-directory: ${{ runner.temp }}/source
+        run: pnpm lint
+
+      - name: Format
+        working-directory: ${{ runner.temp }}/source
+        shell: bash
+        run: |
+          if pnpm run | grep -q '^  format:check'; then
+            pnpm format:check
+          else
+            pnpm format
+          fi
+
+      - name: Reject lint or format mutations
+        working-directory: ${{ runner.temp }}/source
+        run: git diff --exit-code --check && git diff --exit-code
+
+      - name: Type check
+        working-directory: ${{ runner.temp }}/source
+        run: pnpm typecheck
+
+      - name: Check i18n when supported
+        working-directory: ${{ runner.temp }}/source
+        shell: bash
+        run: |
+          if pnpm run | grep -q '^  check:i18n'; then
+            pnpm check:i18n
+          else
+            echo 'This upstream line does not define check:i18n; skipping.'
+          fi
+
+      - name: Run all tests
+        working-directory: ${{ runner.temp }}/source
+        shell: bash
+        run: |
+          if pnpm run | grep -q '^  test:ci'; then
+            pnpm test:ci
+          else
+            pnpm test -- --ci --runInBand
+          fi
+
+      - name: Export Android bundle
+        working-directory: ${{ runner.temp }}/source
+        run: pnpm exec expo export --platform android --output-dir "$RUNNER_TEMP/export-android"
+
+      - name: Export iOS bundle
+        working-directory: ${{ runner.temp }}/source
+        run: pnpm exec expo export --platform ios --output-dir "$RUNNER_TEMP/export-ios"

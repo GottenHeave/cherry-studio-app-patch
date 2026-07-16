@@ -1,0 +1,31 @@
+name: Patch releases
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - patches/**
+
+permissions:
+  contents: write
+
+jobs:
+  main:
+    name: Release main patch line
+    uses: ./.github/workflows/_release-line.yml
+    with:
+      line: main
+      release-enabled: ${{ vars.EAS_RELEASE_ENABLED == 'true' }}
+      eas-project-id: ${{ vars.EAS_PROJECT_ID }}
+    secrets: inherit
+
+  v0-2:
+    name: Release v0.2 patch line
+    uses: ./.github/workflows/_release-line.yml
+    with:
+      line: v0.2
+      release-enabled: ${{ vars.EAS_RELEASE_ENABLED == 'true' }}
+      eas-project-id: ${{ vars.EAS_PROJECT_ID }}
+    secrets: inherit
