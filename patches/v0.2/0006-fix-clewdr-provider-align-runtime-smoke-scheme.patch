@@ -1,0 +1,106 @@
+From 5642da0f45df29bdab8555a68cab916717b22191 Mon Sep 17 00:00:00 2001
+From: GottenHeave <274621501+GottenHeave@users.noreply.github.com>
+Date: Thu, 16 Jul 2026 18:27:00 +0000
+Subject: [PATCH] fix(clewdr-provider): align runtime smoke scheme
+
+Signed-off-by: GottenHeave <274621501+GottenHeave@users.noreply.github.com>
+---
+ scripts/ci/clewdr-runtime-smoke.sh            | 14 ++++++++++-
+ .../__tests__/clewdrRuntimeSmoke.test.ts      | 23 ++++++++++++++++++-
+ src/ai/runtime/clewdrRuntimeSmoke.ts          |  6 +++--
+ 3 files changed, 39 insertions(+), 4 deletions(-)
+
+diff --git a/scripts/ci/clewdr-runtime-smoke.sh b/scripts/ci/clewdr-runtime-smoke.sh
+index 3ab250e..1d2de2f 100755
+--- a/scripts/ci/clewdr-runtime-smoke.sh
++++ b/scripts/ci/clewdr-runtime-smoke.sh
+@@ -41,6 +41,18 @@ for command_name in python3 pnpm curl; do
+   fi
+ done
+ 
++app_scheme="$(python3 -c '
++import json, pathlib, sys
++scheme = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))["expo"].get("scheme")
++if not isinstance(scheme, str) or not scheme:
++    raise SystemExit("app.json expo.scheme must be a non-empty string")
++print(scheme)
++' "$repo_root/app.json")"
++if [[ ! "$app_scheme" =~ ^[a-z][a-z0-9+.-]*$ ]]; then
++  echo "app.json expo.scheme is not a valid URI scheme: $app_scheme" >&2
++  exit 1
++fi
++
+ cd "$repo_root"
+ python3 -m unittest scripts/ci/test_clewdr_runtime_fixture.py
+ python3 "$fixture" --port 0 --port-file "$port_file" >"$fixture_log" 2>&1 &
+@@ -117,7 +129,7 @@ print(devices[0])
+ fi
+ 
+ encoded_endpoint="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$device_endpoint")"
+-smoke_url="cherrystudio://clewdr-runtime-smoke?endpoint=$encoded_endpoint"
++smoke_url="${app_scheme}://clewdr-runtime-smoke?endpoint=$encoded_endpoint"
+ if [[ "$platform" == "android" ]]; then
+   adb -s "$device" shell am start -W -a android.intent.action.VIEW -d "$smoke_url" \
+     -p com.cherry_ai.cherry_studio_app >/dev/null
+diff --git a/src/ai/runtime/__tests__/clewdrRuntimeSmoke.test.ts b/src/ai/runtime/__tests__/clewdrRuntimeSmoke.test.ts
+index 3bb9640..490a3a9 100644
+--- a/src/ai/runtime/__tests__/clewdrRuntimeSmoke.test.ts
++++ b/src/ai/runtime/__tests__/clewdrRuntimeSmoke.test.ts
+@@ -1,8 +1,29 @@
+-import { parseClewdrRuntimeSmokeUrl } from '../clewdrRuntimeSmoke';
++import { readFileSync } from 'node:fs';
++import { join } from 'node:path';
++
++import appJson from '../../../../app.json';
++import { CLEWDR_RUNTIME_SMOKE_SCHEME, parseClewdrRuntimeSmokeUrl } from '../clewdrRuntimeSmoke';
+ 
+ jest.mock('expo/fetch', () => ({ fetch: jest.fn() }));
+ 
+ describe('Clewdr runtime smoke URL', () => {
++  it('uses the Expo scheme in both the runtime gate and native smoke script', () => {
++    const script = readFileSync(join(process.cwd(), 'scripts/ci/clewdr-runtime-smoke.sh'), 'utf8');
++    const shellSchemeReference = '$' + '{app_scheme}';
++
++    expect(CLEWDR_RUNTIME_SMOKE_SCHEME).toBe(appJson.expo.scheme);
++    expect(script).toContain('app_scheme="$(python3');
++    expect(script).toContain('"$repo_root/app.json"');
++    expect(script).toContain(`smoke_url="${shellSchemeReference}://clewdr-runtime-smoke`);
++    expect(script.match(/^smoke_url=/gm)).toHaveLength(1);
++    expect(script.match(/"\$smoke_url"/g)).toHaveLength(2);
++    expect(
++      parseClewdrRuntimeSmokeUrl(
++        `${appJson.expo.scheme}://clewdr-runtime-smoke?endpoint=http%3A%2F%2Flocalhost%3A18484`,
++      ),
++    ).toEqual({ endpoint: 'http://localhost:18484' });
++  });
++
+   it('accepts only the exact smoke deep link with an HTTP endpoint', () => {
+     expect(
+       parseClewdrRuntimeSmokeUrl(
+diff --git a/src/ai/runtime/clewdrRuntimeSmoke.ts b/src/ai/runtime/clewdrRuntimeSmoke.ts
+index 0d35415..25f7a5a 100644
+--- a/src/ai/runtime/clewdrRuntimeSmoke.ts
++++ b/src/ai/runtime/clewdrRuntimeSmoke.ts
+@@ -1,10 +1,11 @@
+ import { createAgent } from '@cherrystudio/ai-core';
+ import { fetch as expoFetch } from 'expo/fetch';
+ 
++import appJson from '../../../app.json';
+ import '../provider/factory';
+ import type { AppProviderSettingsMap } from '../types';
+ 
+-const SMOKE_SCHEME = 'cherrystudio:';
++export const CLEWDR_RUNTIME_SMOKE_SCHEME = appJson.expo.scheme;
+ const SMOKE_HOST = 'clewdr-runtime-smoke';
+ const SMOKE_FILENAME = 'clewdr-runtime-smoke.bin';
+ const SMOKE_MEDIA_TYPE = 'application/octet-stream';
+@@ -37,7 +38,8 @@ interface SmokeResult {
+ export function parseClewdrRuntimeSmokeUrl(url: string): ClewdrRuntimeSmokeOptions | null {
+   try {
+     const parsed = new URL(url);
+-    if (parsed.protocol !== SMOKE_SCHEME || parsed.hostname !== SMOKE_HOST) return null;
++    if (parsed.protocol !== `${CLEWDR_RUNTIME_SMOKE_SCHEME}:` || parsed.hostname !== SMOKE_HOST)
++      return null;
+     if (parsed.pathname || parsed.hash) return null;
+     const queryKeys = [...parsed.searchParams.keys()];
+     if (queryKeys.length !== 1 || queryKeys[0] !== 'endpoint') return null;
